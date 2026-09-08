@@ -6,6 +6,7 @@ import android.content.Context
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraMetadata
 import android.hardware.camera2.CaptureRequest
+import android.media.MediaScannerConnection
 import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
@@ -59,14 +60,26 @@ enum class CameraCaptureMode(val displayName: String) {
     VIDEO("VIDEO")
 }
 
+data class CapturedMediaItem(
+    val uri: Uri,
+    val isVideo: Boolean,
+    val displayName: String,
+    val dateAddedMillis: Long,
+    val relativePath: String = "DCIM/Camera"
+)
+
 data class CameraHardwareDetails(
     val sensorName: String = "Unknown",
     val hardwareLevel: String = "UNKNOWN",
     val isCamera2ApiEnabled: Boolean = true,
     val is60FpsSupported: Boolean = false,
     val availableFpsRanges: List<Range<Int>> = emptyList(),
+    val highSpeedFpsRanges: List<Range<Int>> = emptyList(),
     val activeFpsRange: Range<Int>? = null,
     val isContinuousAfSupported: Boolean = false,
+    val isEisSupported: Boolean = false,
+    val isOisSupported: Boolean = false,
+    val isStabilizationActive: Boolean = true,
     val availableAfModes: List<String> = emptyList(),
     val activeAfMode: String = "AUTO",
     val isSamsungDevice: Boolean = false
@@ -80,6 +93,10 @@ object SamsungCameraHelper {
 
     /**
      * Resolves the optimal FPS range strictly supported by the camera hardware.
+     * Following Open Camera's strategy:
+     * - Priority 1: Fixed [60, 60] (guarantees fixed 60 FPS without dropping)
+     * - Priority 2: Dynamic with upper >= 60 (e.g. [30, 60] standard on Galaxy)
+     * - Fallback: Sensor max upper FPS
      */
     fun resolveOptimalFpsRange(
         supportedRanges: List<Range<Int>>,
@@ -90,7 +107,7 @@ object SamsungCameraHelper {
         }
 
         if (requestedFps == FpsMode.FPS_60) {
-            // 1. Priority 1: Exact fixed 60 [60, 60] if supported by this sensor
+            // 1. Priority 1: Exact fixed 60 [60, 60]
             val exact60 = supportedRanges.firstOrNull { it.lower == 60 && it.upper == 60 }
             if (exact60 != null) return exact60
 
@@ -119,21 +136,22 @@ object SamsungCameraHelper {
 
     /**
      * Builds Preview use case.
-     * When enableCamera2Api is TRUE: uses Camera2Interop to explicitly control FPS & Continuous AF.
-     * When enableCamera2Api is FALSE: uses standard CameraX preview.
+     * When enableCamera2Api is TRUE: uses Camera2Interop to explicitly control FPS, Continuous AF,
+     * and Video Stabilization (EIS/OIS) following Open Camera's configuration.
      */
     @OptIn(ExperimentalCamera2Interop::class)
     fun buildPreview(
         targetFpsRange: Range<Int>?,
         isPhotoMode: Boolean,
-        enableCamera2Api: Boolean = true
+        enableCamera2Api: Boolean = true,
+        enableStabilization: Boolean = true
     ): Preview {
         val previewBuilder = Preview.Builder()
 
         if (enableCamera2Api) {
             val camera2Extender = Camera2Interop.Extender(previewBuilder)
 
-            // Set validated FPS range if available
+            // 1. Target FPS Range
             if (targetFpsRange != null) {
                 camera2Extender.setCaptureRequestOption(
                     CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
@@ -142,29 +160,33 @@ object SamsungCameraHelper {
                 Log.d(TAG, "Preview Camera2: CONTROL_AE_TARGET_FPS_RANGE = $targetFpsRange")
             }
 
-            // Set Continuous AF mode depending on Photo vs Video mode
+            // 2. Continuous AF
             val afMode = if (isPhotoMode) {
                 CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_PICTURE
             } else {
                 CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_VIDEO
             }
+            camera2Extender.setCaptureRequestOption(CaptureRequest.CONTROL_AF_MODE, afMode)
+            camera2Extender.setCaptureRequestOption(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
+            camera2Extender.setCaptureRequestOption(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_ON)
+            camera2Extender.setCaptureRequestOption(CaptureRequest.CONTROL_AWB_MODE, CameraMetadata.CONTROL_AWB_MODE_AUTO)
             camera2Extender.setCaptureRequestOption(
-                CaptureRequest.CONTROL_AF_MODE,
-                afMode
+                CaptureRequest.CONTROL_AE_ANTIBANDING_MODE,
+                CameraMetadata.CONTROL_AE_ANTIBANDING_MODE_AUTO
             )
 
-            camera2Extender.setCaptureRequestOption(
-                CaptureRequest.CONTROL_MODE,
-                CameraMetadata.CONTROL_MODE_AUTO
-            )
-            camera2Extender.setCaptureRequestOption(
-                CaptureRequest.CONTROL_AE_MODE,
-                CameraMetadata.CONTROL_AE_MODE_ON
-            )
-            camera2Extender.setCaptureRequestOption(
-                CaptureRequest.CONTROL_AWB_MODE,
-                CameraMetadata.CONTROL_AWB_MODE_AUTO
-            )
+            // 3. Hardware Video Stabilization (EIS + OIS)
+            if (enableStabilization && !isPhotoMode) {
+                camera2Extender.setCaptureRequestOption(
+                    CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
+                    CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_ON
+                )
+                camera2Extender.setCaptureRequestOption(
+                    CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE,
+                    CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON
+                )
+                Log.d(TAG, "Preview Camera2: EIS and OIS Stabilization enabled")
+            }
         }
 
         return previewBuilder.build()
@@ -180,9 +202,17 @@ object SamsungCameraHelper {
     }
 
     /**
-     * Builds VideoCapture use case configured with the user's selected resolution.
+     * Builds VideoCapture use case configured with the user's selected resolution and FPS.
+     * Open Camera approach: Explicitly injects Camera2 options (FPS range, continuous AF,
+     * and EIS/OIS stabilization) directly into the VideoCapture pipeline.
      */
-    fun buildVideoCapture(resolutionMode: ResolutionMode): VideoCapture<Recorder> {
+    @OptIn(ExperimentalCamera2Interop::class)
+    fun buildVideoCapture(
+        resolutionMode: ResolutionMode,
+        targetFpsRange: Range<Int>?,
+        enableCamera2Api: Boolean = true,
+        enableStabilization: Boolean = true
+    ): VideoCapture<Recorder> {
         val qualitySelector = QualitySelector.from(
             resolutionMode.quality,
             FallbackStrategy.lowerQualityOrHigherThan(resolutionMode.quality)
@@ -191,11 +221,66 @@ object SamsungCameraHelper {
             .setQualitySelector(qualitySelector)
             .build()
 
-        return VideoCapture.withOutput(recorder)
+        val videoCaptureBuilder = VideoCapture.Builder(recorder)
+
+        if (enableCamera2Api) {
+            val camera2Extender = Camera2Interop.Extender(videoCaptureBuilder)
+
+            // Force the 60 FPS range into the video recording stream request
+            if (targetFpsRange != null) {
+                camera2Extender.setCaptureRequestOption(
+                    CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
+                    targetFpsRange
+                )
+                Log.d(TAG, "VideoCapture Camera2: Set target FPS range $targetFpsRange")
+            }
+
+            camera2Extender.setCaptureRequestOption(
+                CaptureRequest.CONTROL_AF_MODE,
+                CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_VIDEO
+            )
+            camera2Extender.setCaptureRequestOption(
+                CaptureRequest.CONTROL_MODE,
+                CameraMetadata.CONTROL_MODE_AUTO
+            )
+            camera2Extender.setCaptureRequestOption(
+                CaptureRequest.CONTROL_AE_MODE,
+                CameraMetadata.CONTROL_AE_MODE_ON
+            )
+            camera2Extender.setCaptureRequestOption(
+                CaptureRequest.CONTROL_AE_ANTIBANDING_MODE,
+                CameraMetadata.CONTROL_AE_ANTIBANDING_MODE_AUTO
+            )
+
+            // Apply Hardware EIS and OIS during video recording
+            if (enableStabilization) {
+                camera2Extender.setCaptureRequestOption(
+                    CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
+                    CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_ON
+                )
+                camera2Extender.setCaptureRequestOption(
+                    CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE,
+                    CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON
+                )
+                Log.d(TAG, "VideoCapture Camera2: EIS + OIS Stabilization applied to video stream")
+            } else {
+                camera2Extender.setCaptureRequestOption(
+                    CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
+                    CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_OFF
+                )
+                camera2Extender.setCaptureRequestOption(
+                    CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE,
+                    CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_OFF
+                )
+            }
+        }
+
+        return videoCaptureBuilder.build()
     }
 
     /**
-     * Safely applies camera controls to the active session based on Camera2 API toggle.
+     * Safely applies camera controls to the active session based on Camera2 API toggle
+     * and Video Stabilization state.
      */
     @OptIn(ExperimentalCamera2Interop::class)
     fun applyActiveHardwareSettings(
@@ -203,7 +288,8 @@ object SamsungCameraHelper {
         camera: Camera,
         targetFpsRange: Range<Int>?,
         isPhotoMode: Boolean,
-        enableCamera2Api: Boolean = true
+        enableCamera2Api: Boolean = true,
+        enableStabilization: Boolean = true
     ) {
         try {
             val camera2CameraControl = Camera2CameraControl.from(camera.cameraControl)
@@ -233,11 +319,35 @@ object SamsungCameraHelper {
             builder.setCaptureRequestOption(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
             builder.setCaptureRequestOption(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_ON)
             builder.setCaptureRequestOption(CaptureRequest.CONTROL_AWB_MODE, CameraMetadata.CONTROL_AWB_MODE_AUTO)
+            builder.setCaptureRequestOption(
+                CaptureRequest.CONTROL_AE_ANTIBANDING_MODE,
+                CameraMetadata.CONTROL_AE_ANTIBANDING_MODE_AUTO
+            )
+
+            if (enableStabilization && !isPhotoMode) {
+                builder.setCaptureRequestOption(
+                    CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
+                    CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_ON
+                )
+                builder.setCaptureRequestOption(
+                    CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE,
+                    CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON
+                )
+            } else {
+                builder.setCaptureRequestOption(
+                    CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
+                    CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_OFF
+                )
+                builder.setCaptureRequestOption(
+                    CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE,
+                    CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_OFF
+                )
+            }
 
             camera2CameraControl.setCaptureRequestOptions(builder.build())
                 .addListener(
                     {
-                        Log.d(TAG, "Hardware settings applied: Camera2=ON, FPS=$targetFpsRange, AF=$afMode")
+                        Log.d(TAG, "Hardware settings applied: Camera2=ON, FPS=$targetFpsRange, AF=$afMode, Stab=$enableStabilization")
                     },
                     ContextCompat.getMainExecutor(context)
                 )
@@ -254,7 +364,6 @@ object SamsungCameraHelper {
         try {
             camera.cameraControl.cancelFocusAndMetering()
 
-            // If previewView is available, trigger a center focus metering action as standard
             previewView?.let { pView ->
                 val centerX = pView.width / 2f
                 val centerY = pView.height / 2f
@@ -284,13 +393,15 @@ object SamsungCameraHelper {
     }
 
     /**
-     * Inspects camera characteristics to read real sensor capabilities and Camera2 Hardware Level.
+     * Inspects camera characteristics to read real sensor capabilities, Camera2 Hardware Level,
+     * High Speed video capabilities, and EIS/OIS stabilization support.
      */
     @OptIn(ExperimentalCamera2Interop::class)
     fun inspectCameraHardware(
         camera: Camera,
         activeRange: Range<Int>?,
-        isCamera2Enabled: Boolean
+        isCamera2Enabled: Boolean,
+        isStabilizationActive: Boolean = true
     ): CameraHardwareDetails {
         return try {
             val camera2Info = Camera2CameraInfo.from(camera.cameraInfo)
@@ -314,7 +425,25 @@ object SamsungCameraHelper {
                 else -> "LIMITED"
             }
 
-            val has60Fps = fpsRanges.any { it.upper >= 60 }
+            // Inspect video stabilization modes (EIS)
+            val videoStabModes = camera2Info.getCameraCharacteristic(
+                CameraCharacteristics.CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES
+            )?.toList() ?: emptyList()
+            val hasEis = videoStabModes.contains(CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_ON)
+
+            // Inspect optical image stabilization modes (OIS)
+            val oisModes = camera2Info.getCameraCharacteristic(
+                CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION
+            )?.toList() ?: emptyList()
+            val hasOis = oisModes.contains(CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON)
+
+            // Inspect high-speed video fps ranges from StreamConfigurationMap
+            val streamMap = camera2Info.getCameraCharacteristic(
+                CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP
+            )
+            val highSpeedRanges = streamMap?.highSpeedVideoFpsRanges?.toList() ?: emptyList()
+
+            val has60Fps = fpsRanges.any { it.upper >= 60 } || highSpeedRanges.any { it.upper >= 60 }
             val hasContinuousAf = afModes.contains(CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_VIDEO) ||
                     afModes.contains(CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
 
@@ -336,8 +465,12 @@ object SamsungCameraHelper {
                 isCamera2ApiEnabled = isCamera2Enabled,
                 is60FpsSupported = has60Fps,
                 availableFpsRanges = fpsRanges,
+                highSpeedFpsRanges = highSpeedRanges,
                 activeFpsRange = activeRange,
                 isContinuousAfSupported = hasContinuousAf,
+                isEisSupported = hasEis,
+                isOisSupported = hasOis,
+                isStabilizationActive = isStabilizationActive,
                 availableAfModes = readableAfModes,
                 activeAfMode = if (hasContinuousAf) "CONTINUOUS" else "AUTO",
                 isSamsungDevice = isSamsungDevice
@@ -348,6 +481,7 @@ object SamsungCameraHelper {
                 sensorName = Build.MODEL,
                 hardwareLevel = "LIMITED",
                 isCamera2ApiEnabled = isCamera2Enabled,
+                isStabilizationActive = isStabilizationActive,
                 isSamsungDevice = isSamsungDevice
             )
         }
@@ -392,42 +526,110 @@ object SamsungCameraHelper {
     }
 
     /**
-     * Queries the latest captured photo in MediaStore.
+     * Queries all recent captured photos and videos from MediaStore (DCIM/Camera & Pictures).
+     * This ensures the gallery viewer never opens to an empty screen and lists actual captures.
      */
-    fun queryLatestCapturedPhoto(context: Context): Uri? {
-        val projection = arrayOf(
-            MediaStore.Images.Media._ID,
-            MediaStore.Images.Media.DATE_ADDED
-        )
-        val sortOrder = "${MediaStore.Images.Media.DATE_ADDED} DESC"
-        return try {
-            val cursor = context.contentResolver.query(
-                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-                projection,
-                null,
-                null,
-                sortOrder
+    fun queryRecentMediaList(context: Context, limit: Int = 30): List<CapturedMediaItem> {
+        val mediaList = mutableListOf<CapturedMediaItem>()
+
+        // 1. Query Images
+        try {
+            val imageProjection = arrayOf(
+                MediaStore.Images.Media._ID,
+                MediaStore.Images.Media.DISPLAY_NAME,
+                MediaStore.Images.Media.DATE_ADDED
             )
-            cursor?.use {
-                if (it.moveToFirst()) {
-                    val idIndex = it.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
-                    val id = it.getLong(idIndex)
-                    ContentUris.withAppendedId(
-                        MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-                        id
+            val imageSortOrder = "${MediaStore.Images.Media.DATE_ADDED} DESC"
+            val imageCursor = context.contentResolver.query(
+                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                imageProjection,
+                null,
+                null,
+                imageSortOrder
+            )
+            imageCursor?.use { cursor ->
+                val idCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
+                val nameCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DISPLAY_NAME)
+                val dateCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DATE_ADDED)
+                var count = 0
+                while (cursor.moveToNext() && count < limit) {
+                    val id = cursor.getLong(idCol)
+                    val name = cursor.getString(nameCol) ?: "Foto"
+                    val dateAdded = cursor.getLong(dateCol) * 1000L
+                    val uri = ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id)
+                    mediaList.add(
+                        CapturedMediaItem(
+                            uri = uri,
+                            isVideo = false,
+                            displayName = name,
+                            dateAddedMillis = dateAdded,
+                            relativePath = "DCIM/Camera"
+                        )
                     )
-                } else {
-                    null
+                    count++
                 }
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Error querying latest photo: ${e.message}")
-            null
+            Log.e(TAG, "Gagal query gambar: ${e.message}")
         }
+
+        // 2. Query Videos
+        try {
+            val videoProjection = arrayOf(
+                MediaStore.Video.Media._ID,
+                MediaStore.Video.Media.DISPLAY_NAME,
+                MediaStore.Video.Media.DATE_ADDED
+            )
+            val videoSortOrder = "${MediaStore.Video.Media.DATE_ADDED} DESC"
+            val videoCursor = context.contentResolver.query(
+                MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
+                videoProjection,
+                null,
+                null,
+                videoSortOrder
+            )
+            videoCursor?.use { cursor ->
+                val idCol = cursor.getColumnIndexOrThrow(MediaStore.Video.Media._ID)
+                val nameCol = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.DISPLAY_NAME)
+                val dateCol = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.DATE_ADDED)
+                var count = 0
+                while (cursor.moveToNext() && count < limit) {
+                    val id = cursor.getLong(idCol)
+                    val name = cursor.getString(nameCol) ?: "Video"
+                    val dateAdded = cursor.getLong(dateCol) * 1000L
+                    val uri = ContentUris.withAppendedId(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, id)
+                    mediaList.add(
+                        CapturedMediaItem(
+                            uri = uri,
+                            isVideo = true,
+                            displayName = name,
+                            dateAddedMillis = dateAdded,
+                            relativePath = "DCIM/Camera"
+                        )
+                    )
+                    count++
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Gagal query video: ${e.message}")
+        }
+
+        // Sort combined list newest first
+        return mediaList.sortedByDescending { it.dateAddedMillis }.take(limit)
     }
 
     /**
-     * Takes a high-resolution photo and saves directly to MediaStore Pictures/SamsungCamera.
+     * Queries the single latest captured photo in MediaStore.
+     */
+    fun queryLatestCapturedPhoto(context: Context): Uri? {
+        val items = queryRecentMediaList(context, limit = 1)
+        return items.firstOrNull()?.uri
+    }
+
+    /**
+     * Takes a high-resolution photo and saves directly to the standard Android & Samsung Camera roll:
+     * DCIM/Camera
+     * This fixes the "folder ternyata kosong" issue by placing it where Samsung Gallery looks by default.
      */
     fun takePhoto(
         context: Context,
@@ -442,7 +644,8 @@ object SamsungCameraHelper {
             put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
             put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/SamsungCamera")
+                // Save to standard DCIM/Camera so Samsung Gallery immediately indexes it
+                put(MediaStore.Images.Media.RELATIVE_PATH, "DCIM/Camera")
             }
         }
 
@@ -458,7 +661,21 @@ object SamsungCameraHelper {
             object : ImageCapture.OnImageSavedCallback {
                 override fun onImageSaved(outputFileResults: ImageCapture.OutputFileResults) {
                     val savedUri = outputFileResults.savedUri ?: queryLatestCapturedPhoto(context) ?: Uri.EMPTY
-                    Log.d(TAG, "Foto berhasil disimpan ke $savedUri")
+                    Log.d(TAG, "Foto berhasil disimpan ke $savedUri di DCIM/Camera")
+
+                    // Notify media scanner to immediately register file in Samsung Gallery
+                    try {
+                        MediaScannerConnection.scanFile(
+                            context.applicationContext,
+                            arrayOf(savedUri.toString()),
+                            arrayOf("image/jpeg")
+                        ) { _, _ ->
+                            Log.d(TAG, "MediaScanner scan completed for $savedUri")
+                        }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "MediaScanner error: ${e.message}")
+                    }
+
                     onSuccess(savedUri)
                 }
 
@@ -471,7 +688,8 @@ object SamsungCameraHelper {
     }
 
     /**
-     * Prepares a video recording session storing output directly to MediaStore Movies/SamsungCamera.
+     * Prepares a video recording session storing output directly to standard DCIM/Camera.
+     * Both Samsung Gallery and Google Photos recognize DCIM/Camera as the primary camera folder.
      */
     fun prepareRecording(
         context: Context,
@@ -487,7 +705,7 @@ object SamsungCameraHelper {
             put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
             put(MediaStore.MediaColumns.MIME_TYPE, "video/mp4")
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/SamsungCamera")
+                put(MediaStore.Video.Media.RELATIVE_PATH, "DCIM/Camera")
             }
         }
 
@@ -508,6 +726,21 @@ object SamsungCameraHelper {
         }
 
         return pending.start(ContextCompat.getMainExecutor(context)) { event ->
+            if (event is VideoRecordEvent.Finalize && !event.hasError()) {
+                val outputUri = event.outputResults.outputUri
+                Log.d(TAG, "Video berhasil difinalisasi ke $outputUri di DCIM/Camera")
+                try {
+                    MediaScannerConnection.scanFile(
+                        context.applicationContext,
+                        arrayOf(outputUri.toString()),
+                        arrayOf("video/mp4")
+                    ) { _, _ ->
+                        Log.d(TAG, "MediaScanner video scan completed")
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "MediaScanner error: ${e.message}")
+                }
+            }
             onEvent(event)
         }
     }

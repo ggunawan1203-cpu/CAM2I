@@ -50,6 +50,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -65,9 +67,11 @@ import androidx.compose.material.icons.filled.HighQuality
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
+import androidx.compose.material.icons.filled.MotionPhotosAuto
 import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.PhotoLibrary
+import androidx.compose.material.icons.filled.PlayCircleFilled
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.ToggleOff
@@ -123,12 +127,15 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import coil.compose.AsyncImage
 import com.example.camera.CameraCaptureMode
 import com.example.camera.CameraHardwareDetails
+import com.example.camera.CapturedMediaItem
 import com.example.camera.FpsMode
 import com.example.camera.ResolutionMode
 import com.example.camera.SamsungCameraHelper
 import com.example.ui.theme.MyApplicationTheme
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import java.text.SimpleDateFormat
+import java.util.Date
 import java.util.Locale
 import kotlin.math.roundToInt
 
@@ -218,7 +225,7 @@ fun PermissionRequestScreen(onRequestPermissions: () -> Unit) {
             Spacer(modifier = Modifier.height(24.dp))
 
             Text(
-                text = "Samsung Camera2 & 60 FPS",
+                text = "Samsung Camera2, 60 FPS & EIS",
                 color = Color.White,
                 fontSize = 20.sp,
                 fontWeight = FontWeight.Bold,
@@ -228,7 +235,7 @@ fun PermissionRequestScreen(onRequestPermissions: () -> Unit) {
             Spacer(modifier = Modifier.height(10.dp))
 
             Text(
-                text = "Izin kamera & audio dibutuhkan untuk kontrol Camera2 API, perekaman 60 FPS, pilihan resolusi, dan Continuous Autofocus.",
+                text = "Izin kamera & audio dibutuhkan untuk kontrol Camera2 API tingkat rendah, perekaman 60 FPS nyata, stabilisasi video EIS/OIS, dan penyimpanan DCIM/Camera.",
                 color = Color(0xFF94A3B8),
                 fontSize = 14.sp,
                 lineHeight = 20.sp,
@@ -276,6 +283,7 @@ fun SamsungCameraView(
     // User Selection States
     var captureMode by remember { mutableStateOf(CameraCaptureMode.PHOTO) }
     var isCamera2ApiEnabled by remember { mutableStateOf(true) }
+    var isVideoStabilizationEnabled by remember { mutableStateOf(true) }
     var selectedFps by remember { mutableStateOf(FpsMode.FPS_60) }
     var selectedResolution by remember { mutableStateOf(ResolutionMode.RES_1080P) }
     var cameraLensFacing by remember { mutableIntStateOf(CameraSelector.LENS_FACING_BACK) }
@@ -288,9 +296,9 @@ fun SamsungCameraView(
     var isPaused by remember { mutableStateOf(false) }
     var recordingDurationSeconds by remember { mutableIntStateOf(0) }
 
-    // Photo Capture Flash Effect & Gallery Preview State
+    // Photo Capture Flash Effect & Media Gallery
     var showPhotoFlash by remember { mutableStateOf(false) }
-    var lastCapturedUri by remember { mutableStateOf<Uri?>(null) }
+    var recentMediaList by remember { mutableStateOf<List<CapturedMediaItem>>(emptyList()) }
     var showGalleryViewer by remember { mutableStateOf(false) }
 
     // Hardware specs & Diagnostic
@@ -303,9 +311,17 @@ fun SamsungCameraView(
     var isFocusing by remember { mutableStateOf(false) }
     var isRefocusingAnimation by remember { mutableStateOf(false) }
 
-    // Query latest photo on startup
+    // Function to reload recent media from DCIM/Camera
+    fun refreshRecentMedia() {
+        coroutineScope.launch {
+            val list = SamsungCameraHelper.queryRecentMediaList(context, limit = 30)
+            recentMediaList = list
+        }
+    }
+
+    // Query recent media on startup
     LaunchedEffect(Unit) {
-        lastCapturedUri = SamsungCameraHelper.queryLatestCapturedPhoto(context)
+        refreshRecentMedia()
     }
 
     // Timer coroutine for recording
@@ -320,7 +336,7 @@ fun SamsungCameraView(
         }
     }
 
-    // Bind camera use cases with Camera2 API option
+    // Bind camera use cases with Camera2 API and Open Camera 60 FPS approach
     fun bindCameraUseCases(pView: PreviewView) {
         val provider = cameraProvider ?: return
         try {
@@ -335,7 +351,8 @@ fun SamsungCameraView(
             val initialSpecs = SamsungCameraHelper.inspectCameraHardware(
                 camera = initialCam,
                 activeRange = null,
-                isCamera2Enabled = isCamera2ApiEnabled
+                isCamera2Enabled = isCamera2ApiEnabled,
+                isStabilizationActive = isVideoStabilizationEnabled
             )
             provider.unbindAll()
 
@@ -348,11 +365,12 @@ fun SamsungCameraView(
 
             val isPhoto = (captureMode == CameraCaptureMode.PHOTO)
 
-            // 1. Build Preview with Camera2 API flag
+            // 1. Build Preview with Camera2 API and EIS/OIS stabilization
             val preview = SamsungCameraHelper.buildPreview(
                 targetFpsRange = optimalRange,
                 isPhotoMode = isPhoto,
-                enableCamera2Api = isCamera2ApiEnabled
+                enableCamera2Api = isCamera2ApiEnabled,
+                enableStabilization = isVideoStabilizationEnabled
             )
             preview.surfaceProvider = pView.surfaceProvider
 
@@ -370,8 +388,13 @@ fun SamsungCameraView(
                     imgCapture
                 )
             } else {
-                // Video mode: Bind Preview + VideoCapture with chosen resolution
-                val vCapture = SamsungCameraHelper.buildVideoCapture(selectedResolution)
+                // Video mode: Bind Preview + VideoCapture with Open Camera explicit 60 FPS & EIS/OIS options
+                val vCapture = SamsungCameraHelper.buildVideoCapture(
+                    resolutionMode = selectedResolution,
+                    targetFpsRange = optimalRange,
+                    enableCamera2Api = isCamera2ApiEnabled,
+                    enableStabilization = isVideoStabilizationEnabled
+                )
                 videoCapture = vCapture
                 imageCapture = null
 
@@ -385,20 +408,22 @@ fun SamsungCameraView(
 
             camera = boundCamera
 
-            // 2. Apply Camera2 Hardware Controls (Active AF & FPS or Standard)
+            // 2. Apply Camera2 Hardware Controls (Active AF, FPS range & Stabilization)
             SamsungCameraHelper.applyActiveHardwareSettings(
                 context = context,
                 camera = boundCamera,
                 targetFpsRange = optimalRange,
                 isPhotoMode = isPhoto,
-                enableCamera2Api = isCamera2ApiEnabled
+                enableCamera2Api = isCamera2ApiEnabled,
+                enableStabilization = isVideoStabilizationEnabled
             )
 
             // 3. Update hardware specs for diagnostic display
             hardwareDetails = SamsungCameraHelper.inspectCameraHardware(
                 camera = boundCamera,
                 activeRange = optimalRange,
-                isCamera2Enabled = isCamera2ApiEnabled
+                isCamera2Enabled = isCamera2ApiEnabled,
+                isStabilizationActive = isVideoStabilizationEnabled
             )
 
         } catch (e: Exception) {
@@ -416,7 +441,14 @@ fun SamsungCameraView(
     }
 
     // Re-bind when settings change
-    LaunchedEffect(captureMode, isCamera2ApiEnabled, selectedFps, selectedResolution, cameraLensFacing) {
+    LaunchedEffect(
+        captureMode,
+        isCamera2ApiEnabled,
+        isVideoStabilizationEnabled,
+        selectedFps,
+        selectedResolution,
+        cameraLensFacing
+    ) {
         if (!isRecording) {
             previewView?.let { bindCameraUseCases(it) }
         }
@@ -448,28 +480,18 @@ fun SamsungCameraView(
                 .fillMaxSize()
                 .pointerInput(camera, previewView) {
                     detectTapGestures { offset ->
-                        val pView = previewView ?: return@detectTapGestures
                         val cam = camera ?: return@detectTapGestures
+                        val pView = previewView ?: return@detectTapGestures
                         tapPoint = offset
                         isFocusing = true
-
-                        SamsungCameraHelper.performTapToFocus(
-                            previewView = pView,
-                            cameraControl = cam.cameraControl,
-                            x = offset.x,
-                            y = offset.y
-                        ) {
-                            coroutineScope.launch {
-                                delay(1200)
-                                isFocusing = false
-                                tapPoint = null
-                            }
+                        SamsungCameraHelper.performTapToFocus(pView, cam.cameraControl, offset.x, offset.y) {
+                            isFocusing = false
                         }
                     }
                 }
         )
 
-        // Shutter Flash Animation (White Screen blink on photo capture)
+        // Shutter White Flash Effect
         if (showPhotoFlash) {
             Box(
                 modifier = Modifier
@@ -478,12 +500,12 @@ fun SamsungCameraView(
             )
         }
 
-        // Tap to Focus Ring Indicator
-        tapPoint?.let { pos ->
+        // Tap-to-Focus Reticle
+        tapPoint?.let { point ->
             val density = LocalDensity.current
             val animatedScale by animateFloatAsState(
-                targetValue = if (isFocusing) 1f else 1.25f,
-                animationSpec = tween(280),
+                targetValue = if (isFocusing) 1.25f else 0.95f,
+                animationSpec = tween(durationMillis = 250),
                 label = "focus_scale"
             )
 
@@ -492,8 +514,8 @@ fun SamsungCameraView(
                     .offset {
                         with(density) {
                             IntOffset(
-                                (pos.x - 36.dp.toPx()).roundToInt(),
-                                (pos.y - 36.dp.toPx()).roundToInt()
+                                (point.x - 36.dp.toPx()).roundToInt(),
+                                (point.y - 36.dp.toPx()).roundToInt()
                             )
                         }
                     }
@@ -547,10 +569,41 @@ fun SamsungCameraView(
             )
         }
 
-        // Top Control Bar with Camera2 API Toggle, Resolution, FPS, Flash, Diagnostics
+        // Stabilization Active Indicator Badge (Visible on Video Mode when active)
+        if (captureMode == CameraCaptureMode.VIDEO && isVideoStabilizationEnabled) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = 76.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(Color(0xFF0F172A).copy(alpha = 0.8f))
+                    .border(1.dp, Color(0xFF10B981).copy(alpha = 0.6f), RoundedCornerShape(12.dp))
+                    .padding(horizontal = 10.dp, vertical = 4.dp)
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Default.MotionPhotosAuto,
+                        contentDescription = null,
+                        tint = Color(0xFF10B981),
+                        modifier = Modifier.size(14.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = "STABILISASI (EIS+OIS) AKTIF",
+                        color = Color(0xFF10B981),
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        letterSpacing = 0.5.sp
+                    )
+                }
+            }
+        }
+
+        // Top Control Bar with Camera2 API, EIS Stabilization, Resolution, FPS, Flash, Diagnostics
         TopHeaderBar(
             captureMode = captureMode,
             isCamera2ApiEnabled = isCamera2ApiEnabled,
+            isVideoStabilizationEnabled = isVideoStabilizationEnabled,
             hardwareLevel = hardwareDetails.hardwareLevel,
             selectedResolution = selectedResolution,
             selectedFps = selectedFps,
@@ -564,6 +617,11 @@ fun SamsungCameraView(
                     Toast.makeText(context, "Camera2 API: $status", Toast.LENGTH_SHORT).show()
                 }
             },
+            onToggleStabilization = {
+                isVideoStabilizationEnabled = !isVideoStabilizationEnabled
+                val status = if (isVideoStabilizationEnabled) "Stabilisasi Video (EIS/OIS) Diaktifkan" else "Stabilisasi Dimatikan"
+                Toast.makeText(context, status, Toast.LENGTH_SHORT).show()
+            },
             onSelectResolution = { selectedResolution = it },
             onSelectFps = { selectedFps = it },
             onToggleTorch = {
@@ -575,23 +633,16 @@ fun SamsungCameraView(
             onOpenInfo = { showInfoDialog = true }
         )
 
-        // Bottom Bar with Gallery Preview Button, Mode Selector, and Shutter Controls
+        // Bottom Bar with Gallery Thumbnail Button, Mode Selector, and Shutter Controls
+        val latestMediaItem = recentMediaList.firstOrNull()
+
         BottomSectionControls(
             modifier = Modifier.align(Alignment.BottomCenter),
             captureMode = captureMode,
-            lastCapturedUri = lastCapturedUri,
+            latestMedia = latestMediaItem,
             onOpenGallery = {
-                if (lastCapturedUri != null) {
-                    showGalleryViewer = true
-                } else {
-                    // Open system gallery intent directly
-                    try {
-                        val galleryIntent = Intent(Intent.ACTION_VIEW, MediaStore.Images.Media.EXTERNAL_CONTENT_URI)
-                        context.startActivity(galleryIntent)
-                    } catch (e: Exception) {
-                        Toast.makeText(context, "Belum ada foto yang diambil", Toast.LENGTH_SHORT).show()
-                    }
-                }
+                refreshRecentMedia()
+                showGalleryViewer = true
             },
             onModeSelected = { newMode ->
                 if (!isRecording) {
@@ -646,8 +697,8 @@ fun SamsungCameraView(
                     context = context,
                     imageCapture = imgCap,
                     onSuccess = { uri ->
-                        lastCapturedUri = uri
-                        Toast.makeText(context, "Foto tersimpan di Galeri Pictures/SamsungCamera", Toast.LENGTH_SHORT).show()
+                        refreshRecentMedia()
+                        Toast.makeText(context, "Foto tersimpan di Galeri DCIM/Camera", Toast.LENGTH_SHORT).show()
                     },
                     onError = { err ->
                         Toast.makeText(context, "Gagal mengambil foto: $err", Toast.LENGTH_SHORT).show()
@@ -666,6 +717,7 @@ fun SamsungCameraView(
                     activeRecording = null
                     isRecording = false
                     isPaused = false
+                    refreshRecentMedia()
                 } else {
                     val fpsTag = activeFpsRange?.upper?.toString() ?: "60"
                     val rec = SamsungCameraHelper.prepareRecording(
@@ -682,10 +734,11 @@ fun SamsungCameraView(
                             is VideoRecordEvent.Finalize -> {
                                 isRecording = false
                                 isPaused = false
+                                refreshRecentMedia()
                                 if (!event.hasError()) {
                                     Toast.makeText(
                                         context,
-                                        "Video tersimpan di Movies/SamsungCamera",
+                                        "Video tersimpan di Galeri DCIM/Camera",
                                         Toast.LENGTH_LONG
                                     ).show()
                                 } else {
@@ -705,10 +758,10 @@ fun SamsungCameraView(
             }
         )
 
-        // Photo Preview Dialog Modal
-        if (showGalleryViewer && lastCapturedUri != null) {
-            PhotoViewerDialog(
-                photoUri = lastCapturedUri!!,
+        // Modern In-App Media Gallery Dialog (Resolves the empty folder issue)
+        if (showGalleryViewer) {
+            ModernMediaGalleryDialog(
+                mediaList = recentMediaList,
                 onDismiss = { showGalleryViewer = false }
             )
         }
@@ -718,8 +771,12 @@ fun SamsungCameraView(
             HardwareInfoDialog(
                 details = hardwareDetails,
                 isCamera2Enabled = isCamera2ApiEnabled,
+                isStabilizationEnabled = isVideoStabilizationEnabled,
                 onToggleCamera2 = {
                     isCamera2ApiEnabled = !isCamera2ApiEnabled
+                },
+                onToggleStabilization = {
+                    isVideoStabilizationEnabled = !isVideoStabilizationEnabled
                 },
                 onDismiss = { showInfoDialog = false }
             )
@@ -731,6 +788,7 @@ fun SamsungCameraView(
 fun TopHeaderBar(
     captureMode: CameraCaptureMode,
     isCamera2ApiEnabled: Boolean,
+    isVideoStabilizationEnabled: Boolean,
     hardwareLevel: String,
     selectedResolution: ResolutionMode,
     selectedFps: FpsMode,
@@ -738,6 +796,7 @@ fun TopHeaderBar(
     isRecording: Boolean,
     isTorchOn: Boolean,
     onToggleCamera2Api: () -> Unit,
+    onToggleStabilization: () -> Unit,
     onSelectResolution: (ResolutionMode) -> Unit,
     onSelectFps: (FpsMode) -> Unit,
     onToggleTorch: () -> Unit,
@@ -751,26 +810,29 @@ fun TopHeaderBar(
             .fillMaxWidth()
             .background(
                 Brush.verticalGradient(
-                    colors = listOf(Color.Black.copy(alpha = 0.85f), Color.Transparent)
+                    colors = listOf(Color.Black.copy(alpha = 0.88f), Color.Transparent)
                 )
             )
             .statusBarsPadding()
-            .padding(horizontal = 10.dp, vertical = 8.dp)
+            .padding(horizontal = 8.dp, vertical = 8.dp)
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Left row: Camera2 API toggle pill & FPS/Resolution
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            // Left row: Camera2 API toggle pill & FPS/Resolution/EIS
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(5.dp)
+            ) {
                 // Camera2 API Toggle Pill
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier
                         .clip(RoundedCornerShape(16.dp))
                         .background(
-                            if (isCamera2ApiEnabled) Color(0xFF0284C7).copy(alpha = 0.85f)
+                            if (isCamera2ApiEnabled) Color(0xFF0284C7).copy(alpha = 0.9f)
                             else Color(0xFF334155).copy(alpha = 0.85f)
                         )
                         .border(
@@ -779,15 +841,15 @@ fun TopHeaderBar(
                             RoundedCornerShape(16.dp)
                         )
                         .clickable(enabled = !isRecording) { onToggleCamera2Api() }
-                        .padding(horizontal = 9.dp, vertical = 5.dp)
+                        .padding(horizontal = 8.dp, vertical = 5.dp)
                 ) {
                     Icon(
                         imageVector = if (isCamera2ApiEnabled) Icons.Default.ToggleOn else Icons.Default.ToggleOff,
                         contentDescription = "Toggle Camera2 API",
                         tint = if (isCamera2ApiEnabled) Color.White else Color(0xFF94A3B8),
-                        modifier = Modifier.size(18.dp)
+                        modifier = Modifier.size(17.dp)
                     )
-                    Spacer(modifier = Modifier.width(4.dp))
+                    Spacer(modifier = Modifier.width(3.dp))
                     Text(
                         text = if (isCamera2ApiEnabled) "Camera2: ON" else "Camera2: OFF",
                         color = Color.White,
@@ -796,7 +858,39 @@ fun TopHeaderBar(
                     )
                 }
 
-                Spacer(modifier = Modifier.width(6.dp))
+                // Video Stabilization EIS/OIS Toggle Pill
+                if (captureMode == CameraCaptureMode.VIDEO) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(
+                                if (isVideoStabilizationEnabled) Color(0xFF059669).copy(alpha = 0.9f)
+                                else Color(0xFF334155).copy(alpha = 0.85f)
+                            )
+                            .border(
+                                1.dp,
+                                if (isVideoStabilizationEnabled) Color(0xFF34D399) else Color(0xFF64748B),
+                                RoundedCornerShape(16.dp)
+                            )
+                            .clickable(enabled = !isRecording) { onToggleStabilization() }
+                            .padding(horizontal = 8.dp, vertical = 5.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.MotionPhotosAuto,
+                            contentDescription = "Stabilizer EIS/OIS",
+                            tint = if (isVideoStabilizationEnabled) Color.White else Color(0xFF94A3B8),
+                            modifier = Modifier.size(15.dp)
+                        )
+                        Spacer(modifier = Modifier.width(3.dp))
+                        Text(
+                            text = if (isVideoStabilizationEnabled) "EIS: ON" else "EIS: OFF",
+                            color = Color.White,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
 
                 // Resolution Dropdown Button (Enabled for Video)
                 if (captureMode == CameraCaptureMode.VIDEO) {
@@ -808,13 +902,13 @@ fun TopHeaderBar(
                                 .background(Color(0xFF1E293B).copy(alpha = 0.9f))
                                 .border(1.dp, Color(0xFF0284C7), RoundedCornerShape(16.dp))
                                 .clickable(enabled = !isRecording) { showResolutionMenu = true }
-                                .padding(horizontal = 8.dp, vertical = 5.dp)
+                                .padding(horizontal = 7.dp, vertical = 5.dp)
                         ) {
                             Icon(
                                 imageVector = Icons.Default.HighQuality,
                                 contentDescription = null,
                                 tint = Color(0xFF38BDF8),
-                                modifier = Modifier.size(15.dp)
+                                modifier = Modifier.size(14.dp)
                             )
                             Spacer(modifier = Modifier.width(3.dp))
                             Text(
@@ -845,8 +939,6 @@ fun TopHeaderBar(
                             }
                         }
                     }
-
-                    Spacer(modifier = Modifier.width(6.dp))
                 }
 
                 // FPS Dropdown Button
@@ -864,13 +956,13 @@ fun TopHeaderBar(
                             .background(Color(0xFF1E293B).copy(alpha = 0.9f))
                             .border(1.dp, Color(0xFF10B981), RoundedCornerShape(16.dp))
                             .clickable(enabled = !isRecording) { showFpsMenu = true }
-                            .padding(horizontal = 8.dp, vertical = 5.dp)
+                            .padding(horizontal = 7.dp, vertical = 5.dp)
                     ) {
                         Icon(
                             imageVector = Icons.Default.Speed,
                             contentDescription = null,
                             tint = Color(0xFF10B981),
-                            modifier = Modifier.size(15.dp)
+                            modifier = Modifier.size(14.dp)
                         )
                         Spacer(modifier = Modifier.width(3.dp))
                         Text(
@@ -905,7 +997,10 @@ fun TopHeaderBar(
             }
 
             // Right icons: Flash and Info Diagnostics
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
                 IconButton(
                     onClick = onToggleTorch,
                     modifier = Modifier
@@ -920,8 +1015,6 @@ fun TopHeaderBar(
                         modifier = Modifier.size(18.dp)
                     )
                 }
-
-                Spacer(modifier = Modifier.width(6.dp))
 
                 IconButton(
                     onClick = onOpenInfo,
@@ -946,7 +1039,7 @@ fun TopHeaderBar(
 fun BottomSectionControls(
     modifier: Modifier = Modifier,
     captureMode: CameraCaptureMode,
-    lastCapturedUri: Uri?,
+    latestMedia: CapturedMediaItem?,
     onOpenGallery: () -> Unit,
     onModeSelected: (CameraCaptureMode) -> Unit,
     isRecording: Boolean,
@@ -1097,7 +1190,7 @@ fun BottomSectionControls(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Left Button: Gallery Thumbnail Button
+            // Left Button: Gallery Thumbnail Button with Live Preview
             Box(
                 modifier = Modifier
                     .size(52.dp)
@@ -1107,13 +1200,28 @@ fun BottomSectionControls(
                     .clickable { onOpenGallery() },
                 contentAlignment = Alignment.Center
             ) {
-                if (lastCapturedUri != null) {
+                if (latestMedia != null) {
                     AsyncImage(
-                        model = lastCapturedUri,
-                        contentDescription = "Hasil Foto Terakhir",
+                        model = latestMedia.uri,
+                        contentDescription = "Hasil Kamera Terakhir",
                         contentScale = ContentScale.Crop,
                         modifier = Modifier.fillMaxSize()
                     )
+                    if (latestMedia.isVideo) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .background(Color.Black.copy(alpha = 0.35f)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.PlayCircleFilled,
+                                contentDescription = null,
+                                tint = Color.White,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                    }
                 } else {
                     Icon(
                         imageVector = Icons.Default.PhotoLibrary,
@@ -1232,12 +1340,20 @@ fun BottomSectionControls(
     }
 }
 
+/**
+ * Modern In-App Media Gallery Dialog.
+ * Directly fixes the "folder ternyata kosong" issue by displaying all photos & videos taken
+ * in DCIM/Camera with an in-app viewer, and opening the exact URI in Samsung Gallery.
+ */
 @Composable
-fun PhotoViewerDialog(
-    photoUri: Uri,
+fun ModernMediaGalleryDialog(
+    mediaList: List<CapturedMediaItem>,
     onDismiss: () -> Unit
 ) {
     val context = LocalContext.current
+    var selectedIndex by remember { mutableIntStateOf(0) }
+
+    val currentItem = mediaList.getOrNull(selectedIndex) ?: mediaList.firstOrNull()
 
     Dialog(
         onDismissRequest = onDismiss,
@@ -1246,100 +1362,281 @@ fun PhotoViewerDialog(
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .background(Color.Black.copy(alpha = 0.95f))
+                .background(Color(0xFF090D16))
         ) {
-            // Main Photo Image
-            AsyncImage(
-                model = photoUri,
-                contentDescription = "Hasil Foto",
-                contentScale = ContentScale.Fit,
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(vertical = 80.dp)
-            )
-
-            // Top Bar with Close Button
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .statusBarsPadding()
-                    .padding(16.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = "Hasil Foto",
-                    color = Color.White,
-                    fontSize = 18.sp,
-                    fontWeight = FontWeight.Bold
-                )
-
-                IconButton(
-                    onClick = onDismiss,
+            Column(modifier = Modifier.fillMaxSize()) {
+                // Top Header Bar
+                Row(
                     modifier = Modifier
-                        .size(40.dp)
-                        .clip(CircleShape)
-                        .background(Color(0xFF1E293B).copy(alpha = 0.8f))
+                        .fillMaxWidth()
+                        .statusBarsPadding()
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Icon(
-                        imageVector = Icons.Default.Close,
-                        contentDescription = "Tutup",
-                        tint = Color.White
-                    )
-                }
-            }
+                    Column {
+                        Text(
+                            text = "Galeri Hasil Kamera",
+                            color = Color.White,
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = if (mediaList.isNotEmpty()) "${mediaList.size} media di folder DCIM/Camera" else "Folder DCIM/Camera",
+                            color = Color(0xFF38BDF8),
+                            fontSize = 12.sp
+                        )
+                    }
 
-            // Bottom Action Bar: Open in Gallery & Share
-            Row(
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .fillMaxWidth()
-                    .navigationBarsPadding()
-                    .padding(24.dp),
-                horizontalArrangement = Arrangement.spacedBy(16.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Button(
-                    onClick = {
-                        try {
-                            val intent = Intent(Intent.ACTION_VIEW).apply {
-                                setDataAndType(photoUri, "image/*")
-                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                            }
-                            context.startActivity(intent)
-                        } catch (e: Exception) {
-                            Toast.makeText(context, "Tidak dapat membuka aplikasi galeri", Toast.LENGTH_SHORT).show()
-                        }
-                    },
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF0284C7)),
-                    shape = RoundedCornerShape(12.dp),
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Icon(Icons.Default.OpenInNew, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text("Buka di Galeri", fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                    IconButton(
+                        onClick = onDismiss,
+                        modifier = Modifier
+                            .size(38.dp)
+                            .clip(CircleShape)
+                            .background(Color(0xFF1E293B))
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = "Tutup",
+                            tint = Color.White
+                        )
+                    }
                 }
 
-                OutlinedButton(
-                    onClick = {
-                        try {
-                            val shareIntent = Intent(Intent.ACTION_SEND).apply {
-                                type = "image/*"
-                                putExtra(Intent.EXTRA_STREAM, photoUri)
-                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                if (currentItem != null) {
+                    // Preview Area for Selected Media
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        AsyncImage(
+                            model = currentItem.uri,
+                            contentDescription = currentItem.displayName,
+                            contentScale = ContentScale.Fit,
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .clip(RoundedCornerShape(12.dp))
+                        )
+
+                        if (currentItem.isVideo) {
+                            Box(
+                                modifier = Modifier
+                                    .size(64.dp)
+                                    .clip(CircleShape)
+                                    .background(Color.Black.copy(alpha = 0.6f))
+                                    .border(2.dp, Color.White, CircleShape)
+                                    .clickable {
+                                        try {
+                                            val intent = Intent(Intent.ACTION_VIEW).apply {
+                                                setDataAndType(currentItem.uri, "video/*")
+                                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                            }
+                                            context.startActivity(intent)
+                                        } catch (e: Exception) {
+                                            Toast.makeText(context, "Tidak dapat memutar video", Toast.LENGTH_SHORT).show()
+                                        }
+                                    },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.PlayCircleFilled,
+                                    contentDescription = "Putar Video",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(44.dp)
+                                )
                             }
-                            context.startActivity(Intent.createChooser(shareIntent, "Bagikan Foto"))
-                        } catch (e: Exception) {
-                            Toast.makeText(context, "Gagal membagikan foto", Toast.LENGTH_SHORT).show()
                         }
-                    },
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White),
-                    border = ButtonDefaults.outlinedButtonBorder.copy(brush = Brush.horizontalGradient(listOf(Color(0xFF38BDF8), Color(0xFF0284C7)))),
-                    shape = RoundedCornerShape(12.dp)
-                ) {
-                    Icon(Icons.Default.Share, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text("Bagikan")
+                    }
+
+                    // Metadata Info Card
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 8.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(Color(0xFF1E293B).copy(alpha = 0.7f))
+                            .padding(horizontal = 12.dp, vertical = 8.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                text = currentItem.displayName,
+                                color = Color.White,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1
+                            )
+                            val typeLabel = if (currentItem.isVideo) "VIDEO" else "FOTO"
+                            Text(
+                                text = typeLabel,
+                                color = if (currentItem.isVideo) Color(0xFFEF4444) else Color(0xFF10B981),
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                        val formattedDate = SimpleDateFormat("dd MMM yyyy, HH:mm", Locale.getDefault()).format(Date(currentItem.dateAddedMillis))
+                        Text(
+                            text = "Lokasi: Internal Storage > DCIM > Camera • $formattedDate",
+                            color = Color(0xFF94A3B8),
+                            fontSize = 11.sp
+                        )
+                    }
+
+                    // Horizontal Thumbnail Strip of Captured Items
+                    if (mediaList.size > 1) {
+                        LazyRow(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 6.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            itemsIndexed(mediaList) { index, item ->
+                                val isSelected = (index == selectedIndex)
+                                Box(
+                                    modifier = Modifier
+                                        .size(60.dp)
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .border(
+                                            width = if (isSelected) 2.5.dp else 1.dp,
+                                            color = if (isSelected) Color(0xFF38BDF8) else Color(0xFF334155),
+                                            shape = RoundedCornerShape(8.dp)
+                                        )
+                                        .clickable { selectedIndex = index }
+                                ) {
+                                    AsyncImage(
+                                        model = item.uri,
+                                        contentDescription = item.displayName,
+                                        contentScale = ContentScale.Crop,
+                                        modifier = Modifier.fillMaxSize()
+                                    )
+                                    if (item.isVideo) {
+                                        Icon(
+                                            imageVector = Icons.Default.PlayCircleFilled,
+                                            contentDescription = null,
+                                            tint = Color.White,
+                                            modifier = Modifier
+                                                .size(16.dp)
+                                                .align(Alignment.BottomEnd)
+                                                .padding(2.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Bottom Action Bar: Open in Gallery & Share
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .navigationBarsPadding()
+                            .padding(horizontal = 16.dp, vertical = 12.dp),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Button(
+                            onClick = {
+                                try {
+                                    val intent = Intent(Intent.ACTION_VIEW).apply {
+                                        val mime = if (currentItem.isVideo) "video/*" else "image/*"
+                                        setDataAndType(currentItem.uri, mime)
+                                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                    }
+                                    context.startActivity(intent)
+                                } catch (e: Exception) {
+                                    Toast.makeText(context, "Tidak dapat membuka aplikasi galeri", Toast.LENGTH_SHORT).show()
+                                }
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF0284C7)),
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(Icons.Default.OpenInNew, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Buka di Galeri", fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                        }
+
+                        OutlinedButton(
+                            onClick = {
+                                try {
+                                    val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                                        type = if (currentItem.isVideo) "video/*" else "image/*"
+                                        putExtra(Intent.EXTRA_STREAM, currentItem.uri)
+                                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                    }
+                                    context.startActivity(Intent.createChooser(shareIntent, "Bagikan Hasil Kamera"))
+                                } catch (e: Exception) {
+                                    Toast.makeText(context, "Gagal membagikan media", Toast.LENGTH_SHORT).show()
+                                }
+                            },
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White),
+                            border = ButtonDefaults.outlinedButtonBorder.copy(
+                                brush = Brush.horizontalGradient(listOf(Color(0xFF38BDF8), Color(0xFF0284C7)))
+                            ),
+                            shape = RoundedCornerShape(12.dp)
+                        ) {
+                            Icon(Icons.Default.Share, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Bagikan")
+                        }
+                    }
+                } else {
+                    // Empty State Card
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth()
+                            .padding(32.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(80.dp)
+                                    .clip(CircleShape)
+                                    .background(Color(0xFF1E293B)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.PhotoLibrary,
+                                    contentDescription = null,
+                                    tint = Color(0xFF94A3B8),
+                                    modifier = Modifier.size(40.dp)
+                                )
+                            }
+                            Spacer(modifier = Modifier.height(16.dp))
+                            Text(
+                                text = "Belum Ada Foto atau Video",
+                                color = Color.White,
+                                fontSize = 17.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                text = "Foto dan video yang Anda ambil akan tersimpan langsung di folder DCIM/Camera perangkat Samsung ini dan akan muncul otomatis di Galeri bawaan.",
+                                color = Color(0xFF94A3B8),
+                                fontSize = 13.sp,
+                                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                                lineHeight = 18.sp
+                            )
+                            Spacer(modifier = Modifier.height(24.dp))
+                            Button(
+                                onClick = onDismiss,
+                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF0284C7)),
+                                shape = RoundedCornerShape(12.dp)
+                            ) {
+                                Text("Ambil Foto Sekarang")
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1350,7 +1647,9 @@ fun PhotoViewerDialog(
 fun HardwareInfoDialog(
     details: CameraHardwareDetails,
     isCamera2Enabled: Boolean,
+    isStabilizationEnabled: Boolean,
     onToggleCamera2: () -> Unit,
+    onToggleStabilization: () -> Unit,
     onDismiss: () -> Unit
 ) {
     AlertDialog(
@@ -1366,7 +1665,7 @@ fun HardwareInfoDialog(
                 )
                 Spacer(modifier = Modifier.width(8.dp))
                 Text(
-                    text = "Status Camera2 API & Sensor",
+                    text = "Status Sensor & Camera2",
                     color = Color.White,
                     fontSize = 17.sp,
                     fontWeight = FontWeight.Bold
@@ -1417,6 +1716,46 @@ fun HardwareInfoDialog(
                     }
                 }
 
+                Spacer(modifier = Modifier.height(10.dp))
+
+                // Video Stabilization (EIS / OIS) Switch Card
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFF1E293B)),
+                    shape = RoundedCornerShape(10.dp)
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Stabilisasi Video (EIS / OIS)",
+                                color = Color.White,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 14.sp
+                            )
+                            Text(
+                                text = if (isStabilizationEnabled) "Aktif: Meredam getaran tangan secara real-time via hardware giroskop sensor" else "Nonaktif: Rekaman tanpa stabilisasi hardware",
+                                color = Color(0xFF94A3B8),
+                                fontSize = 11.sp,
+                                lineHeight = 15.sp
+                            )
+                        }
+
+                        Switch(
+                            checked = isStabilizationEnabled,
+                            onCheckedChange = { onToggleStabilization() },
+                            colors = SwitchDefaults.colors(
+                                checkedThumbColor = Color.White,
+                                checkedTrackColor = Color(0xFF10B981)
+                            )
+                        )
+                    }
+                }
+
                 Spacer(modifier = Modifier.height(12.dp))
 
                 Card(
@@ -1443,6 +1782,24 @@ fun HardwareInfoDialog(
                             color = Color(0xFF334155)
                         )
                         DiagItem(
+                            label = "Stabilisasi Elektronik (EIS)",
+                            value = if (details.isEisSupported) "SUPPORTED (Hardware EIS)" else "N/A",
+                            highlightColor = if (details.isEisSupported) Color(0xFF10B981) else Color(0xFF94A3B8)
+                        )
+                        HorizontalDivider(
+                            modifier = Modifier.padding(vertical = 6.dp),
+                            color = Color(0xFF334155)
+                        )
+                        DiagItem(
+                            label = "Stabilisasi Optik (OIS)",
+                            value = if (details.isOisSupported) "SUPPORTED (Moving Lens Actuator)" else "N/A (EIS Only)",
+                            highlightColor = if (details.isOisSupported) Color(0xFF10B981) else Color(0xFF94A3B8)
+                        )
+                        HorizontalDivider(
+                            modifier = Modifier.padding(vertical = 6.dp),
+                            color = Color(0xFF334155)
+                        )
+                        DiagItem(
                             label = "Continuous Autofocus (AF)",
                             value = if (details.isContinuousAfSupported) "SUPPORTED (Active)" else "Fallback (Auto)",
                             highlightColor = if (details.isContinuousAfSupported) Color(0xFF10B981) else Color(0xFFFBBF24)
@@ -1452,8 +1809,8 @@ fun HardwareInfoDialog(
                             color = Color(0xFF334155)
                         )
                         DiagItem(
-                            label = "Device Manufacturer & Model",
-                            value = "${if (details.isSamsungDevice) "Samsung " else ""}${details.sensorName}",
+                            label = "Lokasi Folder Simpan",
+                            value = "DCIM/Camera (Standar Galeri)",
                             highlightColor = Color(0xFF38BDF8)
                         )
                     }
@@ -1479,6 +1836,23 @@ fun HardwareInfoDialog(
                     fontSize = 11.sp,
                     fontFamily = FontFamily.Monospace
                 )
+
+                if (details.highSpeedFpsRanges.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "High Speed Video Ranges (Slow-Motion/High FPS):",
+                        color = Color(0xFF94A3B8),
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = details.highSpeedFpsRanges.joinToString(", ") { "[${it.lower}, ${it.upper}]" },
+                        color = Color(0xFFFBBF24),
+                        fontSize = 11.sp,
+                        fontFamily = FontFamily.Monospace
+                    )
+                }
             }
         },
         confirmButton = {
