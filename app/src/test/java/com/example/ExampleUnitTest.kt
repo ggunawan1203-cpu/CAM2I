@@ -26,7 +26,10 @@ class ExampleUnitTest {
             Range(30, 60),
             Range(60, 60)
         )
-        val result = SamsungCameraHelper.resolveOptimalFpsRange(supportedRanges, FpsMode.FPS_60)
+        val result = SamsungCameraHelper.resolveOptimalFpsRange(
+            supportedRanges = supportedRanges,
+            requestedFps = FpsMode.FPS_60
+        )
         assertNotNull(result)
         assertEquals(Range(60, 60), result)
     }
@@ -34,20 +37,27 @@ class ExampleUnitTest {
     @Test
     fun testResolveOptimalFpsRange_dynamic60Supported() {
         // Typical Samsung Galaxy device without exact [60,60] but with [30,60]
+        // Open Camera approach: forces strict fixed [60, 60] to cap exposure time at 1/60s and prevent low-light FPS drop
         val supportedRanges = listOf(
             Range(15, 30),
             Range(30, 30),
             Range(30, 60)
         )
-        val result = SamsungCameraHelper.resolveOptimalFpsRange(supportedRanges, FpsMode.FPS_60)
+        val result = SamsungCameraHelper.resolveOptimalFpsRange(
+            supportedRanges = supportedRanges,
+            requestedFps = FpsMode.FPS_60
+        )
         assertNotNull(result)
-        assertEquals(Range(30, 60), result)
+        assertEquals(Range(60, 60), result)
     }
 
     @Test
     fun testResolveOptimalFpsRange_autoReturnsNull() {
         val supportedRanges = listOf(Range(30, 30), Range(30, 60))
-        val result = SamsungCameraHelper.resolveOptimalFpsRange(supportedRanges, FpsMode.FPS_AUTO)
+        val result = SamsungCameraHelper.resolveOptimalFpsRange(
+            supportedRanges = supportedRanges,
+            requestedFps = FpsMode.FPS_AUTO
+        )
         assertNull(result)
     }
 

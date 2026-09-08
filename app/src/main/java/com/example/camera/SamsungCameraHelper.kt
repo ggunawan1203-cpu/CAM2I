@@ -42,17 +42,36 @@ import java.util.concurrent.TimeUnit
 
 private const val TAG = "SamsungCameraHelper"
 
-enum class FpsMode(val displayName: String, val targetFps: Int) {
-    FPS_60("60 FPS", 60),
-    FPS_30("30 FPS", 30),
-    FPS_AUTO("Auto FPS", 0)
+enum class FpsMode(val displayName: String, val targetFps: Int, val description: String) {
+    FPS_120("120 FPS", 120, "High Speed 119 fps (optimal di 720p HD)"),
+    FPS_60("60 FPS", 60, "Ultra Smooth 60 FPS"),
+    FPS_30("30 FPS", 30, "Format standar 30 FPS"),
+    FPS_AUTO("Auto FPS", 0, "Otomatis diatur sensor")
 }
 
-enum class ResolutionMode(val displayName: String, val quality: Quality, val description: String) {
-    RES_4K("4K UHD", Quality.UHD, "3840×2160"),
-    RES_1080P("1080p FHD", Quality.FHD, "1920×1080"),
-    RES_720P("720p HD", Quality.HD, "1280×720"),
-    RES_480P("480p SD", Quality.SD, "854×480")
+enum class BitrateMode(
+    val displayName: String,
+    val bps: Int,
+    val approxPerTenSec: String,
+    val description: String
+) {
+    BITRATE_DEFAULT("Default (~20 Mbps)", 20_000_000, "~25 MB", "Standar CameraX hemat ruang"),
+    BITRATE_50("50 Mbps (Tinggi)", 50_000_000, "~60 MB", "Kualitas tajam, minim kompresi"),
+    BITRATE_100("100 Mbps (Ultra - Open Camera)", 100_000_000, "~113 MB", "Sesuai Open Camera (~113 MB / 10s)"),
+    BITRATE_150("150 Mbps (Maksimum)", 150_000_000, "~180 MB", "Bitrate profesional tanpa kompresi"),
+    BITRATE_200("200 Mbps (Extreme Master)", 200_000_000, "~240 MB", "Kualitas tertinggi hardware Samsung")
+}
+
+enum class ResolutionMode(
+    val displayName: String,
+    val quality: Quality,
+    val description: String,
+    val bestFor: String
+) {
+    RES_4K("4K UHD", Quality.UHD, "3840×2160", "Bitrate ultra 100-150 Mbps"),
+    RES_1080P("1080p FHD", Quality.FHD, "1920×1080", "Standar 60 FPS & 100 Mbps"),
+    RES_720P("720p HD", Quality.HD, "1280×720", "Optimal 120 FPS High Speed (Open Camera 119 fps)"),
+    RES_480P("480p SD", Quality.SD, "854×480", "Ukuran file kecil")
 }
 
 enum class CameraCaptureMode(val displayName: String) {
@@ -94,70 +113,116 @@ object SamsungCameraHelper {
     /**
      * Resolves the optimal FPS range strictly supported by the camera hardware.
      * Following Open Camera's strategy:
-     * - Priority 1: Fixed [60, 60] (guarantees fixed 60 FPS without dropping)
-     * - Priority 2: Dynamic with upper >= 60 (e.g. [30, 60] standard on Galaxy)
+     * - Priority 1: High speed ranges [120, 120] or [60, 60] if requested
+     * - Priority 2: Fixed [target, target] (guarantees fixed FPS without dropping to 22 FPS in low light)
+     * - Priority 3: Dynamic with upper >= target (e.g. [30, 60] standard on Galaxy)
      * - Fallback: Sensor max upper FPS
+     */
+    /**
+     * Resolves the target FPS range following Open Camera's strict fixed FPS algorithm.
+     *
+     * Why videos drop to 17-22 FPS in low light:
+     * When targetFpsRange is variable (e.g. [15, 30] or [30, 60]), the Camera2 Auto Exposure (AE)
+     * routine in dark scenes increases exposure time up to 1/(lower_bound) (e.g. 1/15s = 66ms),
+     * which forces the sensor to drop down to 15-17 FPS to make the image artificially brighter!
+     *
+     * Open Camera's solution:
+     * In Open Camera, when 60 FPS (or 30/120 FPS) is requested, it enforces a STRICT FIXED range:
+     * - For 60 FPS: Range(60, 60)
+     * - For 30 FPS: Range(30, 30)
+     * - For 120 FPS: Range(120, 120)
+     *
+     * When lower == upper == 60:
+     * The camera driver's max exposure time is hard-locked to 1/60s (16.66ms).
+     * The camera driver is physically FORBIDDEN from slowing the frame rate to brighten the scene!
+     * As observed in Open Camera: the scene stays dark naturally in low light, but 60 FPS
+     * is maintained 100% solidly without frame drops!
      */
     fun resolveOptimalFpsRange(
         supportedRanges: List<Range<Int>>,
+        highSpeedRanges: List<Range<Int>> = emptyList(),
         requestedFps: FpsMode
     ): Range<Int>? {
-        if (requestedFps == FpsMode.FPS_AUTO || supportedRanges.isEmpty()) {
+        if (requestedFps == FpsMode.FPS_AUTO) {
             return null
         }
 
-        if (requestedFps == FpsMode.FPS_60) {
-            // 1. Priority 1: Exact fixed 60 [60, 60]
-            val exact60 = supportedRanges.firstOrNull { it.lower == 60 && it.upper == 60 }
-            if (exact60 != null) return exact60
+        val target = requestedFps.targetFps
 
-            // 2. Priority 2: Variable 60 (e.g. [30, 60] or [15, 60]) standard on Samsung Galaxy sensors
-            val dynamic60 = supportedRanges
-                .filter { it.upper >= 60 }
-                .maxByOrNull { it.lower }
-            if (dynamic60 != null) return dynamic60
+        // 1. High Speed 120 FPS (Open Camera 119/120 fps high-speed profile)
+        if (target >= 120) {
+            val exactHs = highSpeedRanges.firstOrNull { it.lower == 120 && it.upper == 120 }
+            if (exactHs != null) return exactHs
 
-            // 3. Fallback: sensor max range if 60 not supported
-            return supportedRanges.maxByOrNull { it.upper }
+            val upperHs = highSpeedRanges.firstOrNull { it.upper >= 120 }
+            if (upperHs != null) return upperHs
+
+            val exactSupp = supportedRanges.firstOrNull { it.lower == 120 && it.upper == 120 }
+            if (exactSupp != null) return exactSupp
+
+            val suppRange = supportedRanges.firstOrNull { it.upper >= 120 }
+            if (suppRange != null) return suppRange
+
+            return Range(120, 120)
         }
 
-        if (requestedFps == FpsMode.FPS_30) {
-            val exact30 = supportedRanges.firstOrNull { it.lower == 30 && it.upper == 30 }
-            if (exact30 != null) return exact30
+        // 2. Strict Fixed 60 FPS (Open Camera 60 FPS mode)
+        if (target == 60) {
+            // Check if exact [60, 60] is listed in either supported or high speed
+            val exactFixed = supportedRanges.firstOrNull { it.lower == 60 && it.upper == 60 }
+                ?: highSpeedRanges.firstOrNull { it.lower == 60 && it.upper == 60 }
+            if (exactFixed != null) return exactFixed
 
-            val dynamic30 = supportedRanges
-                .filter { it.upper == 30 }
-                .maxByOrNull { it.lower }
-            if (dynamic30 != null) return dynamic30
+            // Even if the sensor only declared [15, 60] or [30, 60], we MUST return Range(60, 60)!
+            // Because returning [15, 60] or [30, 60] tells the Camera2 AE algorithm that it can drop
+            // to 15-30 FPS in low light to make the image brighter.
+            // Returning Range(60, 60) caps the exposure time at 1/60s (16.6ms), which keeps the frame
+            // dark naturally in low light (exactly what Open Camera does) and guarantees steady 60 FPS!
+            return Range(60, 60)
         }
 
-        return null
+        // 3. Strict Fixed 30 FPS
+        if (target == 30) {
+            // Return Range(30, 30). NEVER return [15, 30] or [7, 30] which drops to 17 FPS!
+            return Range(30, 30)
+        }
+
+        return Range(target, target)
     }
 
     /**
      * Builds Preview use case.
      * When enableCamera2Api is TRUE: uses Camera2Interop to explicitly control FPS, Continuous AF,
-     * and Video Stabilization (EIS/OIS) following Open Camera's configuration.
+     * Anti-Drop FPS Lock, and Video Stabilization (EIS/OIS) following Open Camera's configuration.
      */
     @OptIn(ExperimentalCamera2Interop::class)
     fun buildPreview(
         targetFpsRange: Range<Int>?,
         isPhotoMode: Boolean,
         enableCamera2Api: Boolean = true,
-        enableStabilization: Boolean = true
+        enableStabilization: Boolean = true,
+        lockFpsAntiDrop: Boolean = true
     ): Preview {
         val previewBuilder = Preview.Builder()
 
         if (enableCamera2Api) {
             val camera2Extender = Camera2Interop.Extender(previewBuilder)
 
-            // 1. Target FPS Range
+            // 1. Target FPS Range (Strict fixed e.g. [60, 60] preventing low-light drop)
             if (targetFpsRange != null) {
                 camera2Extender.setCaptureRequestOption(
                     CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
                     targetFpsRange
                 )
                 Log.d(TAG, "Preview Camera2: CONTROL_AE_TARGET_FPS_RANGE = $targetFpsRange")
+
+                if (targetFpsRange.upper > 0) {
+                    val frameDurationNs = 1_000_000_000L / targetFpsRange.upper
+                    camera2Extender.setCaptureRequestOption(
+                        CaptureRequest.SENSOR_FRAME_DURATION,
+                        frameDurationNs
+                    )
+                }
             }
 
             // 2. Continuous AF
@@ -174,6 +239,22 @@ object SamsungCameraHelper {
                 CaptureRequest.CONTROL_AE_ANTIBANDING_MODE,
                 CameraMetadata.CONTROL_AE_ANTIBANDING_MODE_AUTO
             )
+
+            // Open Camera Anti-Drop: disable scene mode & fast noise reduction so 60 FPS never throttles
+            if (lockFpsAntiDrop && !isPhotoMode) {
+                camera2Extender.setCaptureRequestOption(
+                    CaptureRequest.CONTROL_SCENE_MODE,
+                    CameraMetadata.CONTROL_SCENE_MODE_DISABLED
+                )
+                camera2Extender.setCaptureRequestOption(
+                    CaptureRequest.NOISE_REDUCTION_MODE,
+                    CameraMetadata.NOISE_REDUCTION_MODE_FAST
+                )
+                camera2Extender.setCaptureRequestOption(
+                    CaptureRequest.EDGE_MODE,
+                    CameraMetadata.EDGE_MODE_FAST
+                )
+            }
 
             // 3. Hardware Video Stabilization (EIS + OIS)
             if (enableStabilization && !isPhotoMode) {
@@ -202,37 +283,54 @@ object SamsungCameraHelper {
     }
 
     /**
-     * Builds VideoCapture use case configured with the user's selected resolution and FPS.
-     * Open Camera approach: Explicitly injects Camera2 options (FPS range, continuous AF,
-     * and EIS/OIS stabilization) directly into the VideoCapture pipeline.
+     * Builds VideoCapture use case configured with the user's selected resolution, FPS, and Bitrate.
+     * Open Camera approach:
+     * 1. Injects high video encoding bitrate (up to 100-150 Mbps for crystal clear quality matching Open Camera)
+     * 2. Explicitly injects Camera2 options (strict FPS range, continuous AF, EIS/OIS, and Anti-Drop lock)
      */
     @OptIn(ExperimentalCamera2Interop::class)
     fun buildVideoCapture(
         resolutionMode: ResolutionMode,
         targetFpsRange: Range<Int>?,
+        bitrateMode: BitrateMode = BitrateMode.BITRATE_100,
         enableCamera2Api: Boolean = true,
-        enableStabilization: Boolean = true
+        enableStabilization: Boolean = true,
+        lockFpsAntiDrop: Boolean = true
     ): VideoCapture<Recorder> {
         val qualitySelector = QualitySelector.from(
             resolutionMode.quality,
             FallbackStrategy.lowerQualityOrHigherThan(resolutionMode.quality)
         )
-        val recorder = Recorder.Builder()
+        val recorderBuilder = Recorder.Builder()
             .setQualitySelector(qualitySelector)
-            .build()
 
+        // Set high video encoding bitrate (e.g. 100 Mbps matching Open Camera ~113 MB / 10s)
+        if (bitrateMode.bps > 0) {
+            recorderBuilder.setTargetVideoEncodingBitRate(bitrateMode.bps)
+            Log.d(TAG, "VideoCapture: targetVideoEncodingBitRate = ${bitrateMode.bps} bps (${bitrateMode.displayName})")
+        }
+
+        val recorder = recorderBuilder.build()
         val videoCaptureBuilder = VideoCapture.Builder(recorder)
 
         if (enableCamera2Api) {
             val camera2Extender = Camera2Interop.Extender(videoCaptureBuilder)
 
-            // Force the 60 FPS range into the video recording stream request
+            // Force the target FPS range into the video recording stream request
             if (targetFpsRange != null) {
                 camera2Extender.setCaptureRequestOption(
                     CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
                     targetFpsRange
                 )
                 Log.d(TAG, "VideoCapture Camera2: Set target FPS range $targetFpsRange")
+
+                if (targetFpsRange.upper > 0) {
+                    val frameDurationNs = 1_000_000_000L / targetFpsRange.upper
+                    camera2Extender.setCaptureRequestOption(
+                        CaptureRequest.SENSOR_FRAME_DURATION,
+                        frameDurationNs
+                    )
+                }
             }
 
             camera2Extender.setCaptureRequestOption(
@@ -251,6 +349,22 @@ object SamsungCameraHelper {
                 CaptureRequest.CONTROL_AE_ANTIBANDING_MODE,
                 CameraMetadata.CONTROL_AE_ANTIBANDING_MODE_AUTO
             )
+
+            // Open Camera Anti-Drop: prevent night scene throttling to 22 FPS
+            if (lockFpsAntiDrop) {
+                camera2Extender.setCaptureRequestOption(
+                    CaptureRequest.CONTROL_SCENE_MODE,
+                    CameraMetadata.CONTROL_SCENE_MODE_DISABLED
+                )
+                camera2Extender.setCaptureRequestOption(
+                    CaptureRequest.NOISE_REDUCTION_MODE,
+                    CameraMetadata.NOISE_REDUCTION_MODE_FAST
+                )
+                camera2Extender.setCaptureRequestOption(
+                    CaptureRequest.EDGE_MODE,
+                    CameraMetadata.EDGE_MODE_FAST
+                )
+            }
 
             // Apply Hardware EIS and OIS during video recording
             if (enableStabilization) {
@@ -279,8 +393,8 @@ object SamsungCameraHelper {
     }
 
     /**
-     * Safely applies camera controls to the active session based on Camera2 API toggle
-     * and Video Stabilization state.
+     * Safely applies camera controls to the active session based on Camera2 API toggle,
+     * Anti-Drop FPS lock, and Video Stabilization state.
      */
     @OptIn(ExperimentalCamera2Interop::class)
     fun applyActiveHardwareSettings(
@@ -289,7 +403,8 @@ object SamsungCameraHelper {
         targetFpsRange: Range<Int>?,
         isPhotoMode: Boolean,
         enableCamera2Api: Boolean = true,
-        enableStabilization: Boolean = true
+        enableStabilization: Boolean = true,
+        lockFpsAntiDrop: Boolean = true
     ) {
         try {
             val camera2CameraControl = Camera2CameraControl.from(camera.cameraControl)
@@ -307,6 +422,14 @@ object SamsungCameraHelper {
                     CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
                     targetFpsRange
                 )
+
+                if (targetFpsRange.upper > 0) {
+                    val frameDurationNs = 1_000_000_000L / targetFpsRange.upper
+                    builder.setCaptureRequestOption(
+                        CaptureRequest.SENSOR_FRAME_DURATION,
+                        frameDurationNs
+                    )
+                }
             }
 
             val afMode = if (isPhotoMode) {
@@ -323,6 +446,21 @@ object SamsungCameraHelper {
                 CaptureRequest.CONTROL_AE_ANTIBANDING_MODE,
                 CameraMetadata.CONTROL_AE_ANTIBANDING_MODE_AUTO
             )
+
+            if (lockFpsAntiDrop && !isPhotoMode) {
+                builder.setCaptureRequestOption(
+                    CaptureRequest.CONTROL_SCENE_MODE,
+                    CameraMetadata.CONTROL_SCENE_MODE_DISABLED
+                )
+                builder.setCaptureRequestOption(
+                    CaptureRequest.NOISE_REDUCTION_MODE,
+                    CameraMetadata.NOISE_REDUCTION_MODE_FAST
+                )
+                builder.setCaptureRequestOption(
+                    CaptureRequest.EDGE_MODE,
+                    CameraMetadata.EDGE_MODE_FAST
+                )
+            }
 
             if (enableStabilization && !isPhotoMode) {
                 builder.setCaptureRequestOption(
