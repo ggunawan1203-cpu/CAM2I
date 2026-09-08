@@ -3,10 +3,12 @@ package com.example
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.hardware.camera2.CameraMetadata
 import android.net.Uri
 import android.os.Bundle
 import android.provider.MediaStore
 import android.util.Range
+import android.util.Rational
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -29,18 +31,25 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -57,25 +66,35 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Bolt
+import androidx.compose.material.icons.filled.Camera
 import androidx.compose.material.icons.filled.Cameraswitch
 import androidx.compose.material.icons.filled.CenterFocusStrong
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Face
 import androidx.compose.material.icons.filled.FlashOff
 import androidx.compose.material.icons.filled.FlashOn
+import androidx.compose.material.icons.filled.GridOff
+import androidx.compose.material.icons.filled.GridOn
 import androidx.compose.material.icons.filled.Help
 import androidx.compose.material.icons.filled.HighQuality
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.MotionPhotosAuto
+import androidx.compose.material.icons.filled.NightsStay
 import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.PlayCircleFilled
+import androidx.compose.material.icons.filled.Portrait
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Speed
@@ -83,6 +102,7 @@ import androidx.compose.material.icons.filled.ToggleOff
 import androidx.compose.material.icons.filled.ToggleOn
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Videocam
+import androidx.compose.material.icons.filled.WbSunny
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material3.AlertDialog
@@ -104,6 +124,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -136,8 +157,10 @@ import com.example.camera.CameraCaptureMode
 import com.example.camera.CameraHardwareDetails
 import com.example.camera.CapturedMediaItem
 import com.example.camera.FpsMode
+import com.example.camera.ProVideoManualSettings
 import com.example.camera.ResolutionMode
 import com.example.camera.SamsungCameraHelper
+import kotlin.math.roundToInt
 import com.example.ui.theme.MyApplicationTheme
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -297,6 +320,19 @@ fun SamsungCameraView(
     var isFpsLockEnabled by remember { mutableStateOf(true) }
     var cameraLensFacing by remember { mutableIntStateOf(CameraSelector.LENS_FACING_BACK) }
 
+    // New Camera Features States (Grid, Face Detect, AE Lock, Zoom & Exposure)
+    var isGridEnabled by remember { mutableStateOf(false) }
+    var isFaceDetectionEnabled by remember { mutableStateOf(true) }
+    var detectedFaceCount by remember { mutableIntStateOf(0) }
+    var isAeLocked by remember { mutableStateOf(false) }
+    var currentExposureIndex by remember { mutableIntStateOf(0) }
+    var exposureRange by remember { mutableStateOf(Range(-4, 4)) }
+    var exposureStep by remember { mutableStateOf<Rational?>(Rational(1, 3)) }
+    var isExposureSliderVisible by remember { mutableStateOf(false) }
+    var currentZoomRatio by remember { mutableFloatStateOf(1f) }
+    var minZoomRatio by remember { mutableFloatStateOf(1f) }
+    var maxZoomRatio by remember { mutableFloatStateOf(8f) }
+
     var isTorchEnabled by remember { mutableStateOf(false) }
     var isAudioEnabled by remember { mutableStateOf(hasAudioPermission) }
 
@@ -320,6 +356,25 @@ fun SamsungCameraView(
     var tapPoint by remember { mutableStateOf<Offset?>(null) }
     var isFocusing by remember { mutableStateOf(false) }
     var isRefocusingAnimation by remember { mutableStateOf(false) }
+
+    // Pro Video manual controls state
+    var proVideoSettings by remember { mutableStateOf(ProVideoManualSettings()) }
+    var selectedProTab by remember { mutableStateOf<String?>("ISO") }
+
+    // Auto-dismiss exposure slider after inactivity
+    LaunchedEffect(isExposureSliderVisible, currentExposureIndex) {
+        if (isExposureSliderVisible) {
+            delay(4000)
+            isExposureSliderVisible = false
+        }
+    }
+
+    // Apply Pro Video manual settings when changed
+    LaunchedEffect(proVideoSettings, captureMode) {
+        if (captureMode == CameraCaptureMode.PRO_VIDEO && camera != null) {
+            SamsungCameraHelper.applyProVideoSettings(camera, proVideoSettings)
+        }
+    }
 
     // Function to reload recent media from DCIM/Camera
     fun refreshRecentMedia() {
@@ -374,22 +429,28 @@ fun SamsungCameraView(
             )
             activeFpsRange = optimalRange
 
-            val isPhoto = (captureMode == CameraCaptureMode.PHOTO)
+            val isPhoto = !captureMode.isVideo
 
-            // 1. Build Preview with Camera2 API and EIS/OIS stabilization
+            // 1. Build Preview with Camera2 API, Face Detection, AE Lock, Scene modes, and EIS/OIS stabilization
             val preview = SamsungCameraHelper.buildPreview(
                 targetFpsRange = optimalRange,
                 isPhotoMode = isPhoto,
+                captureMode = captureMode,
                 enableCamera2Api = isCamera2ApiEnabled,
                 enableStabilization = isVideoStabilizationEnabled,
-                lockFpsAntiDrop = isFpsLockEnabled
+                lockFpsAntiDrop = isFpsLockEnabled,
+                enableFaceDetection = isFaceDetectionEnabled,
+                isAeLocked = isAeLocked,
+                onFacesDetected = { faces ->
+                    detectedFaceCount = faces.size
+                }
             )
             preview.surfaceProvider = pView.surfaceProvider
 
             val boundCamera: Camera
             if (isPhoto) {
-                // Photo mode: Bind Preview + ImageCapture
-                val imgCapture = SamsungCameraHelper.buildImageCapture()
+                // Photo modes (FOTO, POTRET, MALAM): Bind Preview + ImageCapture
+                val imgCapture = SamsungCameraHelper.buildImageCapture(captureMode = captureMode)
                 imageCapture = imgCapture
                 videoCapture = null
 
@@ -407,7 +468,9 @@ fun SamsungCameraView(
                     bitrateMode = selectedBitrate,
                     enableCamera2Api = isCamera2ApiEnabled,
                     enableStabilization = isVideoStabilizationEnabled,
-                    lockFpsAntiDrop = isFpsLockEnabled
+                    lockFpsAntiDrop = isFpsLockEnabled,
+                    enableFaceDetection = isFaceDetectionEnabled,
+                    isAeLocked = isAeLocked
                 )
                 videoCapture = vCapture
                 imageCapture = null
@@ -422,15 +485,35 @@ fun SamsungCameraView(
 
             camera = boundCamera
 
-            // 2. Apply Camera2 Hardware Controls (Active AF, FPS range, Anti-Drop & Stabilization)
+            // Observe hardware Zoom state
+            boundCamera.cameraInfo.zoomState.observe(lifecycleOwner) { zState ->
+                if (zState != null) {
+                    currentZoomRatio = zState.zoomRatio
+                    minZoomRatio = zState.minZoomRatio
+                    maxZoomRatio = zState.maxZoomRatio
+                }
+            }
+
+            // Inspect exposure compensation state
+            val expState = boundCamera.cameraInfo.exposureState
+            if (expState.isExposureCompensationSupported) {
+                exposureRange = expState.exposureCompensationRange
+                exposureStep = expState.exposureCompensationStep
+                currentExposureIndex = expState.exposureCompensationIndex
+            }
+
+            // 2. Apply Camera2 Hardware Controls (Active AF, FPS range, Anti-Drop, Face Detect, AE Lock & Stabilization)
             SamsungCameraHelper.applyActiveHardwareSettings(
                 context = context,
                 camera = boundCamera,
                 targetFpsRange = optimalRange,
                 isPhotoMode = isPhoto,
+                captureMode = captureMode,
                 enableCamera2Api = isCamera2ApiEnabled,
                 enableStabilization = isVideoStabilizationEnabled,
-                lockFpsAntiDrop = isFpsLockEnabled
+                lockFpsAntiDrop = isFpsLockEnabled,
+                enableFaceDetection = isFaceDetectionEnabled,
+                isAeLocked = isAeLocked
             )
 
             // 3. Update hardware specs for diagnostic display
@@ -464,7 +547,8 @@ fun SamsungCameraView(
         selectedResolution,
         selectedBitrate,
         isFpsLockEnabled,
-        cameraLensFacing
+        cameraLensFacing,
+        isFaceDetectionEnabled
     ) {
         if (!isRecording) {
             previewView?.let { bindCameraUseCases(it) }
@@ -483,7 +567,7 @@ fun SamsungCameraView(
             .fillMaxSize()
             .background(Color.Black)
     ) {
-        // Camera Preview Viewfinder
+        // Camera Preview Viewfinder with Tap-to-Focus, Long-Press AE Lock, and Pinch-to-Zoom
         AndroidView(
             factory = { ctx ->
                 PreviewView(ctx).apply {
@@ -496,17 +580,49 @@ fun SamsungCameraView(
             modifier = Modifier
                 .fillMaxSize()
                 .pointerInput(camera, previewView) {
-                    detectTapGestures { offset ->
-                        val cam = camera ?: return@detectTapGestures
-                        val pView = previewView ?: return@detectTapGestures
-                        tapPoint = offset
-                        isFocusing = true
-                        SamsungCameraHelper.performTapToFocus(pView, cam.cameraControl, offset.x, offset.y) {
-                            isFocusing = false
+                    detectTapGestures(
+                        onTap = { offset ->
+                            val cam = camera ?: return@detectTapGestures
+                            val pView = previewView ?: return@detectTapGestures
+                            tapPoint = offset
+                            isFocusing = true
+                            isExposureSliderVisible = true
+                            SamsungCameraHelper.performTapToFocus(pView, cam.cameraControl, offset.x, offset.y) {
+                                isFocusing = false
+                            }
+                        },
+                        onLongPress = { offset ->
+                            val cam = camera ?: return@detectTapGestures
+                            tapPoint = offset
+                            isAeLocked = !isAeLocked
+                            SamsungCameraHelper.setAeLock(cam, isAeLocked)
+                            val msg = if (isAeLocked) "Penguncian Cahaya (AE Lock) AKTIF" else "Penguncian Cahaya DILEPAS"
+                            Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
                         }
+                    )
+                }
+                .pointerInput(camera) {
+                    detectTransformGestures { _, _, zoom, _ ->
+                        val cam = camera ?: return@detectTransformGestures
+                        val newRatio = (currentZoomRatio * zoom).coerceIn(minZoomRatio, maxZoomRatio)
+                        cam.cameraControl.setZoomRatio(newRatio)
                     }
                 }
         )
+
+        // Grid 3x3 Overlay (Rule of Thirds)
+        if (isGridEnabled) {
+            Canvas(modifier = Modifier.fillMaxSize()) {
+                val w = size.width
+                val h = size.height
+                val gridColor = Color.White.copy(alpha = 0.35f)
+                val strokeW = 1.dp.toPx()
+                drawLine(gridColor, Offset(w / 3f, 0f), Offset(w / 3f, h), strokeW)
+                drawLine(gridColor, Offset(w * 2f / 3f, 0f), Offset(w * 2f / 3f, h), strokeW)
+                drawLine(gridColor, Offset(0f, h / 3f), Offset(w, h / 3f), strokeW)
+                drawLine(gridColor, Offset(0f, h * 2f / 3f), Offset(w, h * 2f / 3f), strokeW)
+            }
+        }
 
         // Shutter White Flash Effect
         if (showPhotoFlash) {
@@ -517,35 +633,30 @@ fun SamsungCameraView(
             )
         }
 
-        // Tap-to-Focus Reticle
+        // Tap-to-Focus Reticle + Exposure Slider (Brightness Naik-Turun & AE Lock)
         tapPoint?.let { point ->
-            val density = LocalDensity.current
-            val animatedScale by animateFloatAsState(
-                targetValue = if (isFocusing) 1.25f else 0.95f,
-                animationSpec = tween(durationMillis = 250),
-                label = "focus_scale"
-            )
-
-            Box(
-                modifier = Modifier
-                    .offset {
-                        with(density) {
-                            IntOffset(
-                                (point.x - 36.dp.toPx()).roundToInt(),
-                                (point.y - 36.dp.toPx()).roundToInt()
-                            )
+            if (isExposureSliderVisible) {
+                ExposureFocusWidget(
+                    tapPoint = point,
+                    isFocusing = isFocusing,
+                    isAeLocked = isAeLocked,
+                    exposureIndex = currentExposureIndex,
+                    exposureRange = exposureRange,
+                    exposureStep = exposureStep,
+                    onExposureChanged = { newIdx ->
+                        currentExposureIndex = newIdx
+                        camera?.let { cam ->
+                            SamsungCameraHelper.setExposureCompensation(cam, newIdx)
                         }
+                    },
+                    onToggleAeLock = {
+                        isAeLocked = !isAeLocked
+                        camera?.let { cam ->
+                            SamsungCameraHelper.setAeLock(cam, isAeLocked)
+                        }
+                        val msg = if (isAeLocked) "Penguncian Cahaya (AE Lock) AKTIF" else "Penguncian Cahaya DILEPAS"
+                        Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
                     }
-                    .size(72.dp)
-                    .scale(animatedScale)
-                    .border(2.dp, Color(0xFFFBBF24), CircleShape)
-            ) {
-                Box(
-                    modifier = Modifier
-                        .size(6.dp)
-                        .clip(CircleShape)
-                        .background(Color(0xFFFBBF24))
-                        .align(Alignment.Center)
                 )
             }
         }
@@ -586,41 +697,15 @@ fun SamsungCameraView(
             )
         }
 
-        // Stabilization Active Indicator Badge (Visible on Video Mode when active)
-        if (captureMode == CameraCaptureMode.VIDEO && isVideoStabilizationEnabled) {
-            Box(
-                modifier = Modifier
-                    .align(Alignment.TopCenter)
-                    .padding(top = 76.dp)
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(Color(0xFF0F172A).copy(alpha = 0.8f))
-                    .border(1.dp, Color(0xFF10B981).copy(alpha = 0.6f), RoundedCornerShape(12.dp))
-                    .padding(horizontal = 10.dp, vertical = 4.dp)
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        imageVector = Icons.Default.MotionPhotosAuto,
-                        contentDescription = null,
-                        tint = Color(0xFF10B981),
-                        modifier = Modifier.size(14.dp)
-                    )
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text(
-                        text = "STABILISASI (EIS+OIS) AKTIF",
-                        color = Color(0xFF10B981),
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.Bold,
-                        letterSpacing = 0.5.sp
-                    )
-                }
-            }
-        }
-
-        // Top Control Bar with Camera2 API, EIS Stabilization, Resolution, FPS, Bitrate, Flash, Settings, Diagnostics
+        // Top Control Bar with Format pill, Quick Action Icons, Secondary Strip, and Badges (Integrated cleanly without overlaps)
         TopHeaderBar(
             captureMode = captureMode,
             isCamera2ApiEnabled = isCamera2ApiEnabled,
             isVideoStabilizationEnabled = isVideoStabilizationEnabled,
+            isGridEnabled = isGridEnabled,
+            isFaceDetectionEnabled = isFaceDetectionEnabled,
+            detectedFaceCount = detectedFaceCount,
+            isAeLocked = isAeLocked,
             hardwareLevel = hardwareDetails.hardwareLevel,
             selectedResolution = selectedResolution,
             selectedFps = selectedFps,
@@ -640,6 +725,24 @@ fun SamsungCameraView(
                 val status = if (isVideoStabilizationEnabled) "Stabilisasi Video (EIS/OIS) Diaktifkan" else "Stabilisasi Dimatikan"
                 Toast.makeText(context, status, Toast.LENGTH_SHORT).show()
             },
+            onToggleGrid = {
+                isGridEnabled = !isGridEnabled
+                val msg = if (isGridEnabled) "Garis Kisi 3x3 AKTIF" else "Garis Kisi NONAKTIF"
+                Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+            },
+            onToggleFaceDetection = {
+                isFaceDetectionEnabled = !isFaceDetectionEnabled
+                val msg = if (isFaceDetectionEnabled) "Deteksi Wajah Otomatis AKTIF" else "Deteksi Wajah NONAKTIF"
+                Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+            },
+            onToggleAeLock = {
+                isAeLocked = !isAeLocked
+                camera?.let { cam ->
+                    SamsungCameraHelper.setAeLock(cam, isAeLocked)
+                }
+                val msg = if (isAeLocked) "Penguncian Cahaya (AE Lock) AKTIF" else "Penguncian Cahaya DILEPAS"
+                Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+            },
             onSelectResolution = { selectedResolution = it },
             onSelectFps = { selectedFps = it },
             onSelectBitrate = { selectedBitrate = it },
@@ -653,13 +756,19 @@ fun SamsungCameraView(
             onOpenInfo = { showInfoDialog = true }
         )
 
-        // Bottom Bar with Gallery Thumbnail Button, Mode Selector, and Shutter Controls
+        // Bottom Bar with Wide/Zoom Selector, Gallery Thumbnail, Mode Switcher, Pro Video Controls, and Shutter Controls
         val latestMediaItem = recentMediaList.firstOrNull()
 
         BottomSectionControls(
             modifier = Modifier.align(Alignment.BottomCenter),
             captureMode = captureMode,
             latestMedia = latestMediaItem,
+            currentZoomRatio = currentZoomRatio,
+            minZoomRatio = minZoomRatio,
+            maxZoomRatio = maxZoomRatio,
+            onSetZoomRatio = { targetZoom ->
+                camera?.cameraControl?.setZoomRatio(targetZoom)
+            },
             onOpenGallery = {
                 refreshRecentMedia()
                 showGalleryViewer = true
@@ -668,6 +777,13 @@ fun SamsungCameraView(
                 if (!isRecording) {
                     captureMode = newMode
                 }
+            },
+            proVideoSettings = proVideoSettings,
+            selectedProTab = selectedProTab,
+            onSelectProTab = { selectedProTab = it },
+            onProVideoSettingsChanged = { proVideoSettings = it },
+            onShowToast = { msg ->
+                Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
             },
             isRecording = isRecording,
             isPaused = isPaused,
@@ -812,6 +928,17 @@ fun SamsungCameraView(
                         isCamera2ApiEnabled = !isCamera2ApiEnabled
                     }
                 },
+                isGridEnabled = isGridEnabled,
+                onToggleGrid = { isGridEnabled = !isGridEnabled },
+                isFaceDetectionEnabled = isFaceDetectionEnabled,
+                onToggleFaceDetection = { isFaceDetectionEnabled = !isFaceDetectionEnabled },
+                isAeLocked = isAeLocked,
+                onToggleAeLock = {
+                    isAeLocked = !isAeLocked
+                    camera?.let { cam ->
+                        SamsungCameraHelper.setAeLock(cam, isAeLocked)
+                    }
+                },
                 selectedBitrate = selectedBitrate,
                 onSelectBitrate = { selectedBitrate = it },
                 selectedFps = selectedFps,
@@ -837,11 +964,181 @@ fun SamsungCameraView(
     }
 }
 
+/**
+ * Interactive Tap-to-Focus Reticle + Vertical Exposure Slider (Geser Naik-Turun untuk Mengatur Cahaya)
+ * and Light Lock (Penguncian Cahaya / AE Lock) button.
+ */
+@Composable
+fun ExposureFocusWidget(
+    tapPoint: Offset,
+    isFocusing: Boolean,
+    isAeLocked: Boolean,
+    exposureIndex: Int,
+    exposureRange: Range<Int>,
+    exposureStep: Rational?,
+    onExposureChanged: (Int) -> Unit,
+    onToggleAeLock: () -> Unit
+) {
+    val density = LocalDensity.current
+    val minExp = exposureRange.lower
+    val maxExp = exposureRange.upper
+    val span = (maxExp - minExp).coerceAtLeast(1)
+
+    val animatedScale by animateFloatAsState(
+        targetValue = if (isFocusing) 1.22f else 1.0f,
+        animationSpec = tween(durationMillis = 180),
+        label = "focus_scale"
+    )
+
+    // Position slider to the left if tap is close to right screen edge to avoid clipping
+    val sliderToLeft = tapPoint.x > 250f * density.density
+
+    Box(
+        modifier = Modifier
+            .offset {
+                with(density) {
+                    IntOffset(
+                        (tapPoint.x - 36.dp.toPx()).roundToInt(),
+                        (tapPoint.y - 36.dp.toPx()).roundToInt()
+                    )
+                }
+            }
+    ) {
+        // Focus Reticle Ring
+        Box(
+            modifier = Modifier
+                .size(72.dp)
+                .scale(animatedScale)
+                .border(
+                    2.dp,
+                    if (isAeLocked) Color(0xFFF59E0B) else Color(0xFFFBBF24),
+                    CircleShape
+                ),
+            contentAlignment = Alignment.Center
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(6.dp)
+                    .clip(CircleShape)
+                    .background(if (isAeLocked) Color(0xFFF59E0B) else Color(0xFFFBBF24))
+            )
+        }
+
+        // Vertical Exposure Slider (Geser Naik-Turun untuk Mengatur Cahaya)
+        val sliderOffsetXDp = if (sliderToLeft) (-68).dp else 76.dp
+        Column(
+            modifier = Modifier
+                .offset(x = sliderOffsetXDp, y = (-42).dp)
+                .clip(RoundedCornerShape(16.dp))
+                .background(Color(0xFF0F172A).copy(alpha = 0.94f))
+                .border(1.dp, if (isAeLocked) Color(0xFFF59E0B) else Color(0xFF334155), RoundedCornerShape(16.dp))
+                .padding(horizontal = 5.dp, vertical = 6.dp)
+                .pointerInput(exposureIndex, minExp, maxExp) {
+                    detectVerticalDragGestures { _, dragAmount ->
+                        val stepPx = 14f
+                        val delta = (-dragAmount / stepPx).roundToInt()
+                        if (delta != 0) {
+                            val newIdx = (exposureIndex + delta).coerceIn(minExp, maxExp)
+                            if (newIdx != exposureIndex) {
+                                onExposureChanged(newIdx)
+                            }
+                        }
+                    }
+                },
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            // Lock / Unlock button for AE Lock
+            IconButton(
+                onClick = onToggleAeLock,
+                modifier = Modifier.size(28.dp)
+            ) {
+                Icon(
+                    imageVector = if (isAeLocked) Icons.Default.Lock else Icons.Default.LockOpen,
+                    contentDescription = "Penguncian Cahaya",
+                    tint = if (isAeLocked) Color(0xFFF59E0B) else Color(0xFF94A3B8),
+                    modifier = Modifier.size(16.dp)
+                )
+            }
+
+            // Quick increment '+' button
+            IconButton(
+                onClick = {
+                    val next = (exposureIndex + 1).coerceIn(minExp, maxExp)
+                    onExposureChanged(next)
+                },
+                modifier = Modifier.size(22.dp)
+            ) {
+                Icon(Icons.Default.KeyboardArrowUp, contentDescription = "Terang", tint = Color.White, modifier = Modifier.size(16.dp))
+            }
+
+            // Brightness Sun Icon
+            Icon(
+                imageVector = Icons.Default.WbSunny,
+                contentDescription = "Brightness Slider",
+                tint = Color(0xFFFBBF24),
+                modifier = Modifier.size(15.dp)
+            )
+
+            Spacer(modifier = Modifier.height(2.dp))
+
+            // Vertical Track Indicating Current EV
+            Box(
+                modifier = Modifier
+                    .width(10.dp)
+                    .height(68.dp)
+                    .clip(RoundedCornerShape(5.dp))
+                    .background(Color(0xFF334155)),
+                contentAlignment = Alignment.BottomCenter
+            ) {
+                val fraction = ((exposureIndex - minExp).toFloat() / span).coerceIn(0f, 1f)
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .fillMaxHeight(fraction)
+                        .clip(RoundedCornerShape(5.dp))
+                        .background(
+                            Brush.verticalGradient(
+                                listOf(Color(0xFFFBBF24), Color(0xFFF59E0B))
+                            )
+                        )
+                )
+            }
+
+            Spacer(modifier = Modifier.height(2.dp))
+
+            // Quick decrement '-' button
+            IconButton(
+                onClick = {
+                    val prev = (exposureIndex - 1).coerceIn(minExp, maxExp)
+                    onExposureChanged(prev)
+                },
+                modifier = Modifier.size(22.dp)
+            ) {
+                Icon(Icons.Default.KeyboardArrowDown, contentDescription = "Gelap", tint = Color.White, modifier = Modifier.size(16.dp))
+            }
+
+            // EV Index Formatted String
+            val evText = SamsungCameraHelper.formatEvString(exposureIndex, exposureStep)
+            Text(
+                text = evText,
+                color = Color.White,
+                fontSize = 9.sp,
+                fontWeight = FontWeight.Bold,
+                fontFamily = FontFamily.Monospace
+            )
+        }
+    }
+}
+
 @Composable
 fun TopHeaderBar(
     captureMode: CameraCaptureMode,
     isCamera2ApiEnabled: Boolean,
     isVideoStabilizationEnabled: Boolean,
+    isGridEnabled: Boolean,
+    isFaceDetectionEnabled: Boolean,
+    detectedFaceCount: Int,
+    isAeLocked: Boolean,
     hardwareLevel: String,
     selectedResolution: ResolutionMode,
     selectedFps: FpsMode,
@@ -851,6 +1148,9 @@ fun TopHeaderBar(
     isTorchOn: Boolean,
     onToggleCamera2Api: () -> Unit,
     onToggleStabilization: () -> Unit,
+    onToggleGrid: () -> Unit,
+    onToggleFaceDetection: () -> Unit,
+    onToggleAeLock: () -> Unit,
     onSelectResolution: (ResolutionMode) -> Unit,
     onSelectFps: (FpsMode) -> Unit,
     onSelectBitrate: (BitrateMode) -> Unit,
@@ -859,286 +1159,215 @@ fun TopHeaderBar(
     onOpenInfo: () -> Unit
 ) {
     var showResolutionMenu by remember { mutableStateOf(false) }
-    var showFpsMenu by remember { mutableStateOf(false) }
     var showBitrateMenu by remember { mutableStateOf(false) }
 
-    Box(
+    Column(
         modifier = Modifier
             .fillMaxWidth()
             .background(
                 Brush.verticalGradient(
-                    colors = listOf(Color.Black.copy(alpha = 0.88f), Color.Transparent)
+                    colors = listOf(Color.Black.copy(alpha = 0.92f), Color.Black.copy(alpha = 0.45f), Color.Transparent)
                 )
             )
             .statusBarsPadding()
-            .padding(horizontal = 8.dp, vertical = 8.dp)
+            .padding(horizontal = 8.dp, vertical = 6.dp),
+        verticalArrangement = Arrangement.spacedBy(5.dp)
     ) {
+        // Row 1: Primary Bar with Format/Quality Dropdown (Left) & Quick Action Icons (Right)
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Left row: Camera2 API toggle pill & FPS/Resolution/Bitrate/EIS
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(5.dp)
-            ) {
-                // Camera2 API Toggle Pill
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(16.dp))
-                        .background(
-                            if (isCamera2ApiEnabled) Color(0xFF0284C7).copy(alpha = 0.9f)
-                            else Color(0xFF334155).copy(alpha = 0.85f)
-                        )
-                        .border(
-                            1.dp,
-                            if (isCamera2ApiEnabled) Color(0xFF38BDF8) else Color(0xFF64748B),
-                            RoundedCornerShape(16.dp)
-                        )
-                        .clickable(enabled = !isRecording) { onToggleCamera2Api() }
-                        .padding(horizontal = 8.dp, vertical = 5.dp)
-                ) {
-                    Icon(
-                        imageVector = if (isCamera2ApiEnabled) Icons.Default.ToggleOn else Icons.Default.ToggleOff,
-                        contentDescription = "Toggle Camera2 API",
-                        tint = if (isCamera2ApiEnabled) Color.White else Color(0xFF94A3B8),
-                        modifier = Modifier.size(17.dp)
-                    )
-                    Spacer(modifier = Modifier.width(3.dp))
-                    Text(
-                        text = if (isCamera2ApiEnabled) "Camera2: ON" else "Camera2: OFF",
-                        color = Color.White,
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
+            // Quality & FPS Dropdown pill for Video / Pro Video, or Hi-Res Photo indicator
+            if (captureMode.isVideo) {
+                Box {
+                    val resolutionLabel = when (selectedResolution) {
+                        ResolutionMode.RES_4K -> "4K"
+                        ResolutionMode.RES_1080P -> "FHD"
+                        ResolutionMode.RES_720P -> "HD"
+                        ResolutionMode.RES_480P -> "SD"
+                    }
+                    val fpsLabel = when (selectedFps) {
+                        FpsMode.FPS_120 -> activeFpsRange?.let { "${it.upper}" } ?: "120"
+                        FpsMode.FPS_60 -> activeFpsRange?.let { "${it.upper}" } ?: "60"
+                        FpsMode.FPS_30 -> "30"
+                        FpsMode.FPS_AUTO -> "AUTO"
+                    }
 
-                // Video Stabilization EIS/OIS Toggle Pill
-                if (captureMode == CameraCaptureMode.VIDEO) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier
                             .clip(RoundedCornerShape(16.dp))
-                            .background(
-                                if (isVideoStabilizationEnabled) Color(0xFF059669).copy(alpha = 0.9f)
-                                else Color(0xFF334155).copy(alpha = 0.85f)
-                            )
-                            .border(
-                                1.dp,
-                                if (isVideoStabilizationEnabled) Color(0xFF34D399) else Color(0xFF64748B),
-                                RoundedCornerShape(16.dp)
-                            )
-                            .clickable(enabled = !isRecording) { onToggleStabilization() }
+                            .background(Color(0xFF0F172A).copy(alpha = 0.95f))
+                            .border(1.dp, Color(0xFF38BDF8), RoundedCornerShape(16.dp))
+                            .clickable(enabled = !isRecording) { showResolutionMenu = true }
                             .padding(horizontal = 8.dp, vertical = 5.dp)
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.MotionPhotosAuto,
-                            contentDescription = "Stabilizer EIS/OIS",
-                            tint = if (isVideoStabilizationEnabled) Color.White else Color(0xFF94A3B8),
-                            modifier = Modifier.size(15.dp)
-                        )
-                        Spacer(modifier = Modifier.width(3.dp))
                         Text(
-                            text = if (isVideoStabilizationEnabled) "EIS: ON" else "EIS: OFF",
-                            color = Color.White,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-                }
-
-                // Bitrate Dropdown Button (Enabled for Video)
-                if (captureMode == CameraCaptureMode.VIDEO) {
-                    Box {
-                        val bitrateLabel = when (selectedBitrate) {
-                            BitrateMode.BITRATE_100 -> "100M"
-                            BitrateMode.BITRATE_50 -> "50M"
-                            BitrateMode.BITRATE_150 -> "150M"
-                            BitrateMode.BITRATE_200 -> "200M"
-                            BitrateMode.BITRATE_DEFAULT -> "Auto"
-                        }
-
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(16.dp))
-                                .background(Color(0xFF1E293B).copy(alpha = 0.9f))
-                                .border(1.dp, Color(0xFFF59E0B), RoundedCornerShape(16.dp))
-                                .clickable(enabled = !isRecording) { showBitrateMenu = true }
-                                .padding(horizontal = 7.dp, vertical = 5.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Bolt,
-                                contentDescription = null,
-                                tint = Color(0xFFF59E0B),
-                                modifier = Modifier.size(14.dp)
-                            )
-                            Spacer(modifier = Modifier.width(3.dp))
-                            Text(
-                                text = bitrateLabel,
-                                color = Color.White,
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold,
-                                fontFamily = FontFamily.Monospace
-                            )
-                        }
-
-                        DropdownMenu(
-                            expanded = showBitrateMenu,
-                            onDismissRequest = { showBitrateMenu = false }
-                        ) {
-                            BitrateMode.values().forEach { mode ->
-                                DropdownMenuItem(
-                                    text = {
-                                        Column {
-                                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                                Text(
-                                                    text = mode.displayName,
-                                                    fontWeight = if (mode == selectedBitrate) FontWeight.Bold else FontWeight.Normal
-                                                )
-                                                if (mode == BitrateMode.BITRATE_100) {
-                                                    Spacer(modifier = Modifier.width(6.dp))
-                                                    Text(
-                                                        text = "OPEN CAMERA",
-                                                        color = Color(0xFF10B981),
-                                                        fontSize = 9.sp,
-                                                        fontWeight = FontWeight.Bold
-                                                    )
-                                                }
-                                            }
-                                            Text(
-                                                text = "${mode.description} (${mode.approxPerTenSec}/10s)",
-                                                fontSize = 11.sp,
-                                                color = Color.Gray
-                                            )
-                                        }
-                                    },
-                                    onClick = {
-                                        onSelectBitrate(mode)
-                                        showBitrateMenu = false
-                                    }
-                                )
-                            }
-                        }
-                    }
-                }
-
-                // Resolution Dropdown Button (Enabled for Video)
-                if (captureMode == CameraCaptureMode.VIDEO) {
-                    Box {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(16.dp))
-                                .background(Color(0xFF1E293B).copy(alpha = 0.9f))
-                                .border(1.dp, Color(0xFF0284C7), RoundedCornerShape(16.dp))
-                                .clickable(enabled = !isRecording) { showResolutionMenu = true }
-                                .padding(horizontal = 7.dp, vertical = 5.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.HighQuality,
-                                contentDescription = null,
-                                tint = Color(0xFF38BDF8),
-                                modifier = Modifier.size(14.dp)
-                            )
-                            Spacer(modifier = Modifier.width(3.dp))
-                            Text(
-                                text = selectedResolution.displayName,
-                                color = Color.White,
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-
-                        DropdownMenu(
-                            expanded = showResolutionMenu,
-                            onDismissRequest = { showResolutionMenu = false }
-                        ) {
-                            ResolutionMode.values().forEach { mode ->
-                                DropdownMenuItem(
-                                    text = {
-                                        Column {
-                                            Text(mode.displayName, fontWeight = FontWeight.Bold)
-                                            Text(mode.description, fontSize = 11.sp, color = Color.Gray)
-                                        }
-                                    },
-                                    onClick = {
-                                        onSelectResolution(mode)
-                                        showResolutionMenu = false
-                                    }
-                                )
-                            }
-                        }
-                    }
-                }
-
-                // FPS Dropdown Button
-                Box {
-                    val fpsLabel = when (selectedFps) {
-                        FpsMode.FPS_120 -> activeFpsRange?.let { "${it.upper} FPS" } ?: "120 FPS"
-                        FpsMode.FPS_60 -> activeFpsRange?.let { "${it.upper} FPS" } ?: "60 FPS"
-                        FpsMode.FPS_30 -> "30 FPS"
-                        FpsMode.FPS_AUTO -> "AUTO FPS"
-                    }
-
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(16.dp))
-                            .background(Color(0xFF1E293B).copy(alpha = 0.9f))
-                            .border(1.dp, Color(0xFF10B981), RoundedCornerShape(16.dp))
-                            .clickable(enabled = !isRecording) { showFpsMenu = true }
-                            .padding(horizontal = 7.dp, vertical = 5.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Speed,
-                            contentDescription = null,
-                            tint = Color(0xFF10B981),
-                            modifier = Modifier.size(14.dp)
-                        )
-                        Spacer(modifier = Modifier.width(3.dp))
-                        Text(
-                            text = fpsLabel,
+                            text = "$resolutionLabel • ${fpsLabel}FPS",
                             color = Color.White,
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold,
                             fontFamily = FontFamily.Monospace
                         )
+                        Spacer(modifier = Modifier.width(3.dp))
+                        Icon(
+                            imageVector = Icons.Default.ArrowDropDown,
+                            contentDescription = null,
+                            tint = Color(0xFF38BDF8),
+                            modifier = Modifier.size(16.dp)
+                        )
                     }
 
                     DropdownMenu(
-                        expanded = showFpsMenu,
-                        onDismissRequest = { showFpsMenu = false }
+                        expanded = showResolutionMenu,
+                        onDismissRequest = { showResolutionMenu = false }
                     ) {
+                        Text(
+                            text = "  RESOLUSI VIDEO",
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.Gray,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+                        )
+                        ResolutionMode.values().forEach { mode ->
+                            DropdownMenuItem(
+                                text = {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(
+                                            mode.displayName,
+                                            fontWeight = if (mode == selectedResolution) FontWeight.Bold else FontWeight.Normal,
+                                            color = if (mode == selectedResolution) Color(0xFF0284C7) else Color.Unspecified
+                                        )
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text(mode.description, fontSize = 11.sp, color = Color.Gray)
+                                    }
+                                },
+                                onClick = {
+                                    onSelectResolution(mode)
+                                    showResolutionMenu = false
+                                }
+                            )
+                        }
+                        HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+                        Text(
+                            text = "  FRAME RATE (FPS)",
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.Gray,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+                        )
                         FpsMode.values().forEach { mode ->
                             DropdownMenuItem(
                                 text = {
                                     Text(
-                                        text = mode.displayName,
-                                        fontWeight = if (mode == selectedFps) FontWeight.Bold else FontWeight.Normal
+                                        mode.displayName,
+                                        fontWeight = if (mode == selectedFps) FontWeight.Bold else FontWeight.Normal,
+                                        color = if (mode == selectedFps) Color(0xFF10B981) else Color.Unspecified
                                     )
                                 },
                                 onClick = {
                                     onSelectFps(mode)
-                                    showFpsMenu = false
+                                    showResolutionMenu = false
                                 }
                             )
                         }
                     }
                 }
+            } else {
+                // Photo Mode Pill
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(Color(0xFF0F172A).copy(alpha = 0.9f))
+                        .border(1.dp, Color(0xFF0284C7), RoundedCornerShape(16.dp))
+                        .padding(horizontal = 8.dp, vertical = 5.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Camera,
+                        contentDescription = null,
+                        tint = Color(0xFF38BDF8),
+                        modifier = Modifier.size(14.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = "HI-RES PHOTO",
+                        color = Color.White,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
             }
 
-            // Right icons: Flash, Open Camera Settings, Info Diagnostics
+            // Right Quick Action Icons (Grid, Face, AE Lock, Flash, Settings, Info)
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
             ) {
+                // Grid 3x3 toggle button
+                IconButton(
+                    onClick = onToggleGrid,
+                    modifier = Modifier
+                        .size(34.dp)
+                        .clip(CircleShape)
+                        .background(
+                            if (isGridEnabled) Color(0xFF0284C7).copy(alpha = 0.85f)
+                            else Color(0xFF1E293B).copy(alpha = 0.7f)
+                        )
+                ) {
+                    Icon(
+                        imageVector = if (isGridEnabled) Icons.Default.GridOn else Icons.Default.GridOff,
+                        contentDescription = "Garis Kisi 3x3",
+                        tint = if (isGridEnabled) Color.White else Color(0xFF94A3B8),
+                        modifier = Modifier.size(17.dp)
+                    )
+                }
+
+                // Face Detection toggle button
+                IconButton(
+                    onClick = onToggleFaceDetection,
+                    modifier = Modifier
+                        .size(34.dp)
+                        .clip(CircleShape)
+                        .background(
+                            if (isFaceDetectionEnabled) Color(0xFF0284C7).copy(alpha = 0.85f)
+                            else Color(0xFF1E293B).copy(alpha = 0.7f)
+                        )
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Face,
+                        contentDescription = "Deteksi Wajah Otomatis",
+                        tint = if (isFaceDetectionEnabled) Color.White else Color(0xFF94A3B8),
+                        modifier = Modifier.size(17.dp)
+                    )
+                }
+
+                // Penguncian Cahaya (AE Lock) button
+                IconButton(
+                    onClick = onToggleAeLock,
+                    modifier = Modifier
+                        .size(34.dp)
+                        .clip(CircleShape)
+                        .background(
+                            if (isAeLocked) Color(0xFFF59E0B).copy(alpha = 0.9f)
+                            else Color(0xFF1E293B).copy(alpha = 0.7f)
+                        )
+                ) {
+                    Icon(
+                        imageVector = if (isAeLocked) Icons.Default.Lock else Icons.Default.LockOpen,
+                        contentDescription = "Penguncian Cahaya",
+                        tint = if (isAeLocked) Color.White else Color(0xFF94A3B8),
+                        modifier = Modifier.size(17.dp)
+                    )
+                }
+
+                // Flash Torch
                 IconButton(
                     onClick = onToggleTorch,
                     modifier = Modifier
-                        .size(36.dp)
+                        .size(34.dp)
                         .clip(CircleShape)
                         .background(Color(0xFF1E293B).copy(alpha = 0.7f))
                 ) {
@@ -1146,14 +1375,15 @@ fun TopHeaderBar(
                         imageVector = if (isTorchOn) Icons.Default.FlashOn else Icons.Default.FlashOff,
                         contentDescription = "Flash",
                         tint = if (isTorchOn) Color(0xFFFBBF24) else Color.White,
-                        modifier = Modifier.size(18.dp)
+                        modifier = Modifier.size(17.dp)
                     )
                 }
 
+                // Open Camera Settings Gear
                 IconButton(
                     onClick = onOpenSettings,
                     modifier = Modifier
-                        .size(36.dp)
+                        .size(34.dp)
                         .clip(CircleShape)
                         .background(Color(0xFF0284C7).copy(alpha = 0.85f))
                 ) {
@@ -1161,14 +1391,15 @@ fun TopHeaderBar(
                         imageVector = Icons.Default.Settings,
                         contentDescription = "Pengaturan Open Camera",
                         tint = Color.White,
-                        modifier = Modifier.size(18.dp)
+                        modifier = Modifier.size(17.dp)
                     )
                 }
 
+                // Diagnostics Info
                 IconButton(
                     onClick = onOpenInfo,
                     modifier = Modifier
-                        .size(36.dp)
+                        .size(34.dp)
                         .clip(CircleShape)
                         .background(Color(0xFF1E293B).copy(alpha = 0.7f))
                 ) {
@@ -1176,8 +1407,447 @@ fun TopHeaderBar(
                         imageVector = Icons.Default.Info,
                         contentDescription = "Info Diagnostics",
                         tint = Color(0xFF38BDF8),
-                        modifier = Modifier.size(18.dp)
+                        modifier = Modifier.size(17.dp)
                     )
+                }
+            }
+        }
+
+        // Row 2: Secondary Hardware Status Quick Strip (Camera2, EIS, Bitrate)
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            // Camera2 API Toggle Pill
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(
+                        if (isCamera2ApiEnabled) Color(0xFF0284C7).copy(alpha = 0.9f)
+                        else Color(0xFF334155).copy(alpha = 0.85f)
+                    )
+                    .border(
+                        1.dp,
+                        if (isCamera2ApiEnabled) Color(0xFF38BDF8) else Color(0xFF64748B),
+                        RoundedCornerShape(14.dp)
+                    )
+                    .clickable(enabled = !isRecording) { onToggleCamera2Api() }
+                    .padding(horizontal = 7.dp, vertical = 3.dp)
+            ) {
+                Icon(
+                    imageVector = if (isCamera2ApiEnabled) Icons.Default.ToggleOn else Icons.Default.ToggleOff,
+                    contentDescription = "Toggle Camera2 API",
+                    tint = if (isCamera2ApiEnabled) Color.White else Color(0xFF94A3B8),
+                    modifier = Modifier.size(15.dp)
+                )
+                Spacer(modifier = Modifier.width(3.dp))
+                Text(
+                    text = if (isCamera2ApiEnabled) "Camera2: ON" else "Camera2: OFF",
+                    color = Color.White,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+
+            // Video Stabilization EIS/OIS Toggle Pill
+            if (captureMode.isVideo) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(
+                            if (isVideoStabilizationEnabled) Color(0xFF059669).copy(alpha = 0.9f)
+                            else Color(0xFF334155).copy(alpha = 0.85f)
+                        )
+                        .border(
+                            1.dp,
+                            if (isVideoStabilizationEnabled) Color(0xFF34D399) else Color(0xFF64748B),
+                            RoundedCornerShape(14.dp)
+                        )
+                        .clickable(enabled = !isRecording) { onToggleStabilization() }
+                        .padding(horizontal = 7.dp, vertical = 3.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.MotionPhotosAuto,
+                        contentDescription = "Stabilizer EIS/OIS",
+                        tint = if (isVideoStabilizationEnabled) Color.White else Color(0xFF94A3B8),
+                        modifier = Modifier.size(14.dp)
+                    )
+                    Spacer(modifier = Modifier.width(3.dp))
+                    Text(
+                        text = if (isVideoStabilizationEnabled) "EIS: ON" else "EIS: OFF",
+                        color = Color.White,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+
+                // Bitrate Dropdown Button (Enabled for Video)
+                Box {
+                    val bitrateLabel = when (selectedBitrate) {
+                        BitrateMode.BITRATE_100 -> "100M"
+                        BitrateMode.BITRATE_50 -> "50M"
+                        BitrateMode.BITRATE_150 -> "150M"
+                        BitrateMode.BITRATE_200 -> "200M"
+                        BitrateMode.BITRATE_DEFAULT -> "Auto"
+                    }
+
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(Color(0xFF1E293B).copy(alpha = 0.9f))
+                            .border(1.dp, Color(0xFFF59E0B), RoundedCornerShape(14.dp))
+                            .clickable(enabled = !isRecording) { showBitrateMenu = true }
+                            .padding(horizontal = 7.dp, vertical = 3.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Bolt,
+                            contentDescription = null,
+                            tint = Color(0xFFF59E0B),
+                            modifier = Modifier.size(13.dp)
+                        )
+                        Spacer(modifier = Modifier.width(3.dp))
+                        Text(
+                            text = bitrateLabel,
+                            color = Color.White,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    }
+
+                    DropdownMenu(
+                        expanded = showBitrateMenu,
+                        onDismissRequest = { showBitrateMenu = false }
+                    ) {
+                        BitrateMode.values().forEach { mode ->
+                            DropdownMenuItem(
+                                text = {
+                                    Column {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Text(
+                                                text = mode.displayName,
+                                                fontWeight = if (mode == selectedBitrate) FontWeight.Bold else FontWeight.Normal
+                                            )
+                                            if (mode == BitrateMode.BITRATE_100) {
+                                                Spacer(modifier = Modifier.width(6.dp))
+                                                Text(
+                                                    text = "OPEN CAMERA",
+                                                    color = Color(0xFF10B981),
+                                                    fontSize = 9.sp,
+                                                    fontWeight = FontWeight.Bold
+                                                )
+                                            }
+                                        }
+                                        Text(
+                                            text = "${mode.description} (${mode.approxPerTenSec}/10s)",
+                                            fontSize = 11.sp,
+                                            color = Color.Gray
+                                        )
+                                    }
+                                },
+                                onClick = {
+                                    onSelectBitrate(mode)
+                                    showBitrateMenu = false
+                                }
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        // Row 3: Active Status Badges (Centred directly beneath - prevents any overlaps!)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.Center,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            if (captureMode == CameraCaptureMode.PORTRAIT) {
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(Color(0xFF78350F).copy(alpha = 0.9f))
+                        .border(1.dp, Color(0xFFF59E0B), RoundedCornerShape(10.dp))
+                        .padding(horizontal = 8.dp, vertical = 2.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.Portrait, null, tint = Color(0xFFF59E0B), modifier = Modifier.size(12.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("MODE POTRET • BOKEH DEPTH", color = Color(0xFFF59E0B), fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+            } else if (captureMode == CameraCaptureMode.NIGHT) {
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(Color(0xFF4C1D95).copy(alpha = 0.9f))
+                        .border(1.dp, Color(0xFF8B5CF6), RoundedCornerShape(10.dp))
+                        .padding(horizontal = 8.dp, vertical = 2.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.NightsStay, null, tint = Color(0xFFC4B5FD), modifier = Modifier.size(12.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("MODE MALAM • LOW NOISE NR", color = Color(0xFFC4B5FD), fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+            } else if (captureMode == CameraCaptureMode.PRO_VIDEO) {
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(Color(0xFF881337).copy(alpha = 0.9f))
+                        .border(1.dp, Color(0xFFFB7185), RoundedCornerShape(10.dp))
+                        .padding(horizontal = 8.dp, vertical = 2.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.Tune, null, tint = Color(0xFFFB7185), modifier = Modifier.size(12.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("MODE PRO VIDEO • KONTROL MANUAL", color = Color(0xFFFB7185), fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+
+            if (isAeLocked) {
+                Spacer(modifier = Modifier.width(6.dp))
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(Color(0xFF78350F).copy(alpha = 0.9f))
+                        .border(1.dp, Color(0xFFFBBF24), RoundedCornerShape(10.dp))
+                        .padding(horizontal = 8.dp, vertical = 2.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.Lock, null, tint = Color(0xFFFBBF24), modifier = Modifier.size(12.dp))
+                        Spacer(modifier = Modifier.width(3.dp))
+                        Text("CAHAYA TERKUNCI", color = Color(0xFFFBBF24), fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+
+            if (isFaceDetectionEnabled && detectedFaceCount > 0) {
+                Spacer(modifier = Modifier.width(6.dp))
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(Color(0xFF0C4A6E).copy(alpha = 0.9f))
+                        .border(1.dp, Color(0xFF38BDF8), RoundedCornerShape(10.dp))
+                        .padding(horizontal = 8.dp, vertical = 2.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.Face, null, tint = Color(0xFF38BDF8), modifier = Modifier.size(12.dp))
+                        Spacer(modifier = Modifier.width(3.dp))
+                        Text("$detectedFaceCount Wajah Terdeteksi", color = Color(0xFF38BDF8), fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Interactive Pro Video Control Bar:
+ * Allows user to control ISO, Shutter Speed, White Balance, Focus, and Audio direction.
+ */
+@Composable
+fun ProVideoControlBar(
+    proSettings: ProVideoManualSettings,
+    activeTab: String?,
+    onSelectTab: (String?) -> Unit,
+    onSettingsChanged: (ProVideoManualSettings) -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 8.dp, vertical = 4.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        // Active Sub-Options Selector (Horizontal chip list when a tab is selected)
+        AnimatedVisibility(
+            visible = activeTab != null,
+            enter = fadeIn() + expandVertically(),
+            exit = fadeOut() + shrinkVertically()
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(Color(0xFF0F172A).copy(alpha = 0.95f))
+                    .border(1.dp, Color(0xFFE11D48).copy(alpha = 0.6f), RoundedCornerShape(16.dp))
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = 8.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                when (activeTab) {
+                    "ISO" -> {
+                        val isoOptions = listOf(0 to "AUTO", 50 to "50", 100 to "100", 200 to "200", 400 to "400", 800 to "800", 1600 to "1600", 3200 to "3200")
+                        isoOptions.forEach { (valIso, label) ->
+                            val isSel = (proSettings.iso == valIso)
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(if (isSel) Color(0xFFE11D48) else Color(0xFF1E293B))
+                                    .clickable { onSettingsChanged(proSettings.copy(iso = valIso)) }
+                                    .padding(horizontal = 10.dp, vertical = 4.dp)
+                            ) {
+                                Text(label, color = if (isSel) Color.White else Color(0xFFCBD5E1), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+                    "SPEED" -> {
+                        val speedOptions = listOf(
+                            0L to "AUTO",
+                            1_000_000L to "1/1000",
+                            2_000_000L to "1/500",
+                            4_000_000L to "1/250",
+                            8_000_000L to "1/125",
+                            16_666_666L to "1/60",
+                            33_333_333L to "1/30"
+                        )
+                        speedOptions.forEach { (speedNs, label) ->
+                            val isSel = (proSettings.shutterSpeedNs == speedNs)
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(if (isSel) Color(0xFFE11D48) else Color(0xFF1E293B))
+                                    .clickable { onSettingsChanged(proSettings.copy(shutterSpeedNs = speedNs)) }
+                                    .padding(horizontal = 10.dp, vertical = 4.dp)
+                            ) {
+                                Text(label, color = if (isSel) Color.White else Color(0xFFCBD5E1), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+                    "WB" -> {
+                        val wbOptions = listOf(
+                            CameraMetadata.CONTROL_AWB_MODE_AUTO to "AUTO",
+                            CameraMetadata.CONTROL_AWB_MODE_INCANDESCENT to "💡 2800K",
+                            CameraMetadata.CONTROL_AWB_MODE_FLUORESCENT to "🔦 4000K",
+                            CameraMetadata.CONTROL_AWB_MODE_DAYLIGHT to "☀️ 5500K",
+                            CameraMetadata.CONTROL_AWB_MODE_CLOUDY_DAYLIGHT to "☁️ 6500K"
+                        )
+                        wbOptions.forEach { (wbVal, label) ->
+                            val isSel = (proSettings.awbMode == wbVal)
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(if (isSel) Color(0xFFE11D48) else Color(0xFF1E293B))
+                                    .clickable { onSettingsChanged(proSettings.copy(awbMode = wbVal)) }
+                                    .padding(horizontal = 10.dp, vertical = 4.dp)
+                            ) {
+                                Text(label, color = if (isSel) Color.White else Color(0xFFCBD5E1), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+                    "FOCUS" -> {
+                        val focusOptions = listOf(
+                            -1f to "AF Otomatis",
+                            10.0f to "Makro (10cm)",
+                            2.0f to "Dekat (50cm)",
+                            1.0f to "Potret (1m)",
+                            0.0f to "Jauh (∞)"
+                        )
+                        focusOptions.forEach { (dist, label) ->
+                            val isSel = (proSettings.focusDistance == dist)
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(if (isSel) Color(0xFFE11D48) else Color(0xFF1E293B))
+                                    .clickable { onSettingsChanged(proSettings.copy(focusDistance = dist)) }
+                                    .padding(horizontal = 10.dp, vertical = 4.dp)
+                            ) {
+                                Text(label, color = if (isSel) Color.White else Color(0xFFCBD5E1), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+                    "MIC" -> {
+                        val micOptions = listOf(
+                            "OMNI" to "🎙️ OMNI (Semua Arah)",
+                            "FRONT" to "🎤 DEPAN (Subjek)",
+                            "REAR" to "🎧 BELAKANG (Kamera)"
+                        )
+                        micOptions.forEach { (src, label) ->
+                            val isSel = (proSettings.audioSource == src)
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(if (isSel) Color(0xFFE11D48) else Color(0xFF1E293B))
+                                    .clickable { onSettingsChanged(proSettings.copy(audioSource = src)) }
+                                    .padding(horizontal = 10.dp, vertical = 4.dp)
+                            ) {
+                                Text(label, color = if (isSel) Color.White else Color(0xFFCBD5E1), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(4.dp))
+
+        // Main Tab Buttons (ISO, SPEED, WB, FOCUS, MIC)
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(18.dp))
+                .background(Color(0xFF0F172A).copy(alpha = 0.90f))
+                .border(1.dp, Color(0xFF334155), RoundedCornerShape(18.dp))
+                .horizontalScroll(rememberScrollState())
+                .padding(horizontal = 4.dp, vertical = 3.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            val tabs = listOf(
+                "ISO" to (if (proSettings.iso == 0) "AUTO" else "${proSettings.iso}"),
+                "SPEED" to (when (proSettings.shutterSpeedNs) {
+                    0L -> "AUTO"
+                    1_000_000L -> "1/1000"
+                    2_000_000L -> "1/500"
+                    4_000_000L -> "1/250"
+                    8_000_000L -> "1/125"
+                    16_666_666L -> "1/60"
+                    33_333_333L -> "1/30"
+                    else -> "MANUAL"
+                }),
+                "WB" to (when (proSettings.awbMode) {
+                    CameraMetadata.CONTROL_AWB_MODE_INCANDESCENT -> "2800K"
+                    CameraMetadata.CONTROL_AWB_MODE_FLUORESCENT -> "4000K"
+                    CameraMetadata.CONTROL_AWB_MODE_DAYLIGHT -> "5500K"
+                    CameraMetadata.CONTROL_AWB_MODE_CLOUDY_DAYLIGHT -> "6500K"
+                    else -> "AUTO"
+                }),
+                "FOCUS" to (if (proSettings.focusDistance < 0f) "AF-C" else "MF"),
+                "MIC" to proSettings.audioSource
+            )
+
+            tabs.forEach { (tabId, valueLabel) ->
+                val isSelected = (activeTab == tabId)
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(if (isSelected) Color(0xFFE11D48) else Color(0xFF1E293B).copy(alpha = 0.6f))
+                        .clickable { onSelectTab(if (isSelected) null else tabId) }
+                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(
+                            text = tabId,
+                            color = if (isSelected) Color.White else Color(0xFF94A3B8),
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = valueLabel,
+                            color = if (isSelected) Color.White else Color(0xFF38BDF8),
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    }
                 }
             }
         }
@@ -1189,8 +1859,17 @@ fun BottomSectionControls(
     modifier: Modifier = Modifier,
     captureMode: CameraCaptureMode,
     latestMedia: CapturedMediaItem?,
+    currentZoomRatio: Float,
+    minZoomRatio: Float,
+    maxZoomRatio: Float,
+    onSetZoomRatio: (Float) -> Unit,
     onOpenGallery: () -> Unit,
     onModeSelected: (CameraCaptureMode) -> Unit,
+    proVideoSettings: ProVideoManualSettings,
+    selectedProTab: String?,
+    onSelectProTab: (String?) -> Unit,
+    onProVideoSettingsChanged: (ProVideoManualSettings) -> Unit,
+    onShowToast: (String) -> Unit,
     isRecording: Boolean,
     isPaused: Boolean,
     recordingDurationSeconds: Int,
@@ -1217,11 +1896,11 @@ fun BottomSectionControls(
             .fillMaxWidth()
             .background(
                 Brush.verticalGradient(
-                    colors = listOf(Color.Transparent, Color.Black.copy(alpha = 0.92f))
+                    colors = listOf(Color.Transparent, Color.Black.copy(alpha = 0.94f))
                 )
             )
             .navigationBarsPadding()
-            .padding(horizontal = 20.dp, vertical = 14.dp),
+            .padding(horizontal = 14.dp, vertical = 8.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         // Video Duration Timer (Visible only when recording)
@@ -1268,70 +1947,158 @@ fun BottomSectionControls(
             }
         }
 
-        Spacer(modifier = Modifier.height(10.dp))
+        // Pro Video Manual Controls Bar (Shown when in PRO_VIDEO mode)
+        if (captureMode == CameraCaptureMode.PRO_VIDEO) {
+            ProVideoControlBar(
+                proSettings = proVideoSettings,
+                activeTab = selectedProTab,
+                onSelectTab = onSelectProTab,
+                onSettingsChanged = onProVideoSettingsChanged
+            )
+        }
 
-        // Mode Switcher: FOTO | VIDEO (Disabled during recording)
+        Spacer(modifier = Modifier.height(4.dp))
+
+        // Zoom & Wide Mode Selector: 0.5x WIDE | 1x | 2x
         Row(
             modifier = Modifier
-                .clip(RoundedCornerShape(24.dp))
+                .clip(RoundedCornerShape(20.dp))
                 .background(Color(0xFF0F172A).copy(alpha = 0.85f))
-                .border(1.dp, Color(0xFF334155), RoundedCornerShape(24.dp))
-                .padding(4.dp)
+                .border(1.dp, Color(0xFF334155), RoundedCornerShape(20.dp))
+                .padding(3.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            val isPhoto = (captureMode == CameraCaptureMode.PHOTO)
+            val isWideActive = currentZoomRatio <= 0.75f
+            val is1xActive = currentZoomRatio in 0.8f..1.3f
+            val is2xActive = currentZoomRatio >= 1.8f
 
+            // 0.5x WIDE Button (Wide-angle support for video and photo)
             Box(
                 modifier = Modifier
-                    .clip(RoundedCornerShape(20.dp))
-                    .background(if (isPhoto) Color(0xFF0284C7) else Color.Transparent)
-                    .clickable(enabled = !isRecording) { onModeSelected(CameraCaptureMode.PHOTO) }
-                    .padding(horizontal = 18.dp, vertical = 6.dp),
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(if (isWideActive) Color(0xFF0284C7) else Color.Transparent)
+                    .clickable {
+                        val target = if (minZoomRatio < 0.9f) minZoomRatio else 0.5f
+                        onSetZoomRatio(target.coerceIn(minZoomRatio, maxZoomRatio))
+                        if (minZoomRatio >= 0.95f) {
+                            onShowToast("Mode Wide: Menggunakan sudut pandang terlebar sensor")
+                        }
+                    }
+                    .padding(horizontal = 10.dp, vertical = 4.dp),
                 contentAlignment = Alignment.Center
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        imageVector = Icons.Default.PhotoCamera,
-                        contentDescription = null,
-                        tint = if (isPhoto) Color.White else Color(0xFF94A3B8),
-                        modifier = Modifier.size(16.dp)
-                    )
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text(
-                        text = "FOTO",
-                        color = if (isPhoto) Color.White else Color(0xFF94A3B8),
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
+                Text(
+                    text = "0.5x WIDE",
+                    color = if (isWideActive) Color.White else Color(0xFF94A3B8),
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold
+                )
             }
 
+            // 1x Normal Button
             Box(
                 modifier = Modifier
-                    .clip(RoundedCornerShape(20.dp))
-                    .background(if (!isPhoto) Color(0xFFEF4444) else Color.Transparent)
-                    .clickable(enabled = !isRecording) { onModeSelected(CameraCaptureMode.VIDEO) }
-                    .padding(horizontal = 18.dp, vertical = 6.dp),
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(if (is1xActive) Color(0xFF0284C7) else Color.Transparent)
+                    .clickable {
+                        onSetZoomRatio(1.0f.coerceIn(minZoomRatio, maxZoomRatio))
+                    }
+                    .padding(horizontal = 12.dp, vertical = 4.dp),
                 contentAlignment = Alignment.Center
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        imageVector = Icons.Default.Videocam,
-                        contentDescription = null,
-                        tint = if (!isPhoto) Color.White else Color(0xFF94A3B8),
-                        modifier = Modifier.size(16.dp)
-                    )
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text(
-                        text = "VIDEO",
-                        color = if (!isPhoto) Color.White else Color(0xFF94A3B8),
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold
-                    )
+                Text(
+                    text = "1x",
+                    color = if (is1xActive) Color.White else Color(0xFF94A3B8),
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+
+            // 2x Tele Button
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(if (is2xActive) Color(0xFF0284C7) else Color.Transparent)
+                    .clickable {
+                        onSetZoomRatio(2.0f.coerceIn(minZoomRatio, maxZoomRatio))
+                    }
+                    .padding(horizontal = 12.dp, vertical = 4.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = "2x",
+                    color = if (is2xActive) Color.White else Color(0xFF94A3B8),
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        // Mode Switcher Carousel: POTRET | FOTO | MALAM | VIDEO | PRO VIDEO
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.Center,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Row(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(24.dp))
+                    .background(Color(0xFF0F172A).copy(alpha = 0.88f))
+                    .border(1.dp, Color(0xFF334155), RoundedCornerShape(24.dp))
+                    .padding(3.dp),
+                horizontalArrangement = Arrangement.spacedBy(2.dp)
+            ) {
+                CameraCaptureMode.values().forEach { mode ->
+                    val isSelected = (captureMode == mode)
+                    val accentColor = when (mode) {
+                        CameraCaptureMode.PORTRAIT -> Color(0xFFF59E0B)
+                        CameraCaptureMode.PHOTO -> Color(0xFF0284C7)
+                        CameraCaptureMode.NIGHT -> Color(0xFF8B5CF6)
+                        CameraCaptureMode.VIDEO -> Color(0xFFEF4444)
+                        CameraCaptureMode.PRO_VIDEO -> Color(0xFFE11D48)
+                    }
+                    val icon = when (mode) {
+                        CameraCaptureMode.PORTRAIT -> Icons.Default.Portrait
+                        CameraCaptureMode.PHOTO -> Icons.Default.PhotoCamera
+                        CameraCaptureMode.NIGHT -> Icons.Default.NightsStay
+                        CameraCaptureMode.VIDEO -> Icons.Default.Videocam
+                        CameraCaptureMode.PRO_VIDEO -> Icons.Default.Tune
+                    }
+
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(20.dp))
+                            .background(if (isSelected) accentColor else Color.Transparent)
+                            .clickable(enabled = !isRecording) { onModeSelected(mode) }
+                            .padding(horizontal = 10.dp, vertical = 5.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = icon,
+                                contentDescription = mode.displayName,
+                                tint = if (isSelected) Color.White else Color(0xFF94A3B8),
+                                modifier = Modifier.size(13.dp)
+                            )
+                            Spacer(modifier = Modifier.width(3.dp))
+                            Text(
+                                text = mode.displayName,
+                                color = if (isSelected) Color.White else Color(0xFF94A3B8),
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
                 }
             }
         }
 
-        Spacer(modifier = Modifier.height(18.dp))
+        Spacer(modifier = Modifier.height(12.dp))
 
         // Main Controls Row: Gallery Thumbnail, Shutter Button, Switch Camera
         Row(
@@ -1381,7 +2148,7 @@ fun BottomSectionControls(
                 }
             }
 
-            // Audio mic toggle (for video) or Pause button
+            // Audio mic toggle (for video) or Pause button when recording
             if (isRecording) {
                 IconButton(
                     onClick = onPauseResumeRecording,
@@ -1397,7 +2164,7 @@ fun BottomSectionControls(
                         modifier = Modifier.size(26.dp)
                     )
                 }
-            } else if (captureMode == CameraCaptureMode.VIDEO) {
+            } else if (captureMode.isVideo) {
                 IconButton(
                     onClick = onToggleAudio,
                     modifier = Modifier
@@ -1416,36 +2183,20 @@ fun BottomSectionControls(
                 Spacer(modifier = Modifier.width(48.dp))
             }
 
-            // Central Shutter Button
-            if (captureMode == CameraCaptureMode.PHOTO) {
-                // Photo Shutter Button
+            // Central Shutter Button (Adapts according to Mode: Video, Pro Video, Potret, Foto, Malam)
+            if (captureMode.isVideo) {
+                // Video & Pro Video Shutter Button
+                val proColor = if (captureMode == CameraCaptureMode.PRO_VIDEO) Color(0xFFE11D48) else Color(0xFFDC2626)
                 Box(
                     modifier = Modifier
                         .size(76.dp)
                         .clip(CircleShape)
-                        .border(4.dp, Color.White, CircleShape)
-                        .clickable { onPhotoShutterClick() },
-                    contentAlignment = Alignment.Center
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(60.dp)
-                            .clip(CircleShape)
-                            .background(Color.White)
-                    )
-                }
-            } else {
-                // Video Shutter Button
-                Box(
-                    modifier = Modifier
-                        .size(76.dp)
-                        .clip(CircleShape)
-                        .border(4.dp, Color.White, CircleShape)
+                        .border(4.dp, if (captureMode == CameraCaptureMode.PRO_VIDEO) Color(0xFFFB7185) else Color.White, CircleShape)
                         .clickable { onVideoShutterClick() },
                     contentAlignment = Alignment.Center
                 ) {
                     val recordColor by animateColorAsState(
-                        targetValue = if (isRecording) Color(0xFFEF4444) else Color(0xFFDC2626),
+                        targetValue = if (isRecording) Color(0xFFEF4444) else proColor,
                         label = "rec_color"
                     )
 
@@ -1464,6 +2215,29 @@ fun BottomSectionControls(
                                 .background(recordColor)
                         )
                     }
+                }
+            } else {
+                // Photo / Portrait / Night Shutter Button
+                val (shutterRingColor, shutterInnerColor) = when (captureMode) {
+                    CameraCaptureMode.PORTRAIT -> Pair(Color(0xFFF59E0B), Color(0xFFFBBF24))
+                    CameraCaptureMode.NIGHT -> Pair(Color(0xFF8B5CF6), Color(0xFFC4B5FD))
+                    else -> Pair(Color.White, Color.White)
+                }
+
+                Box(
+                    modifier = Modifier
+                        .size(76.dp)
+                        .clip(CircleShape)
+                        .border(4.dp, shutterRingColor, CircleShape)
+                        .clickable { onPhotoShutterClick() },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(60.dp)
+                            .clip(CircleShape)
+                            .background(shutterInnerColor)
+                    )
                 }
             }
 
@@ -2033,6 +2807,12 @@ fun DiagItem(label: String, value: String, highlightColor: Color) {
 fun OpenCameraSettingsDialog(
     isCamera2Enabled: Boolean,
     onToggleCamera2: () -> Unit,
+    isGridEnabled: Boolean,
+    onToggleGrid: () -> Unit,
+    isFaceDetectionEnabled: Boolean,
+    onToggleFaceDetection: () -> Unit,
+    isAeLocked: Boolean,
+    onToggleAeLock: () -> Unit,
     selectedBitrate: BitrateMode,
     onSelectBitrate: (BitrateMode) -> Unit,
     selectedFps: FpsMode,
@@ -2198,6 +2978,132 @@ fun OpenCameraSettingsDialog(
                             colors = SwitchDefaults.colors(
                                 checkedThumbColor = Color.White,
                                 checkedTrackColor = Color(0xFF0284C7)
+                            )
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                // Pengaturan Komposisi & Fokus: Garis Kisi (Grid), Deteksi Wajah, Penguncian Cahaya
+                Text(
+                    text = "Bidikan & Pencahayaan (Foto & Video):",
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 14.sp
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+
+                // Card: Garis Kisi (Grid 3x3)
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFF1E293B)),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(14.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Garis Kisi Komposisi (Grid 3x3)",
+                                color = Color.White,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 13.sp
+                            )
+                            Spacer(modifier = Modifier.height(3.dp))
+                            Text(
+                                text = "Menampilkan panduan 'rule of thirds' emas untuk mempermudah framing objek foto & video.",
+                                color = Color(0xFF94A3B8),
+                                fontSize = 11.sp
+                            )
+                        }
+                        Switch(
+                            checked = isGridEnabled,
+                            onCheckedChange = { onToggleGrid() },
+                            colors = SwitchDefaults.colors(
+                                checkedThumbColor = Color.White,
+                                checkedTrackColor = Color(0xFF0284C7)
+                            )
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                // Card: Deteksi Wajah Otomatis
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFF1E293B)),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(14.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Deteksi Wajah Otomatis (Face Detection)",
+                                color = Color.White,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 13.sp
+                            )
+                            Spacer(modifier = Modifier.height(3.dp))
+                            Text(
+                                text = "Mengunci fokus dan pencahayaan otomatis ke wajah subjek di depan kamera.",
+                                color = Color(0xFF94A3B8),
+                                fontSize = 11.sp
+                            )
+                        }
+                        Switch(
+                            checked = isFaceDetectionEnabled,
+                            onCheckedChange = { onToggleFaceDetection() },
+                            colors = SwitchDefaults.colors(
+                                checkedThumbColor = Color.White,
+                                checkedTrackColor = Color(0xFF10B981)
+                            )
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                // Card: Penguncian Cahaya (AE Lock)
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFF1E293B)),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(14.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Penguncian Cahaya (AE Lock)",
+                                color = Color.White,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 13.sp
+                            )
+                            Spacer(modifier = Modifier.height(3.dp))
+                            Text(
+                                text = "Mengunci nilai eksposur/cahaya saat ini agar tidak berfluktuasi saat kamera bergerak.",
+                                color = Color(0xFF94A3B8),
+                                fontSize = 11.sp
+                            )
+                        }
+                        Switch(
+                            checked = isAeLocked,
+                            onCheckedChange = { onToggleAeLock() },
+                            colors = SwitchDefaults.colors(
+                                checkedThumbColor = Color.White,
+                                checkedTrackColor = Color(0xFFF59E0B)
                             )
                         )
                     }

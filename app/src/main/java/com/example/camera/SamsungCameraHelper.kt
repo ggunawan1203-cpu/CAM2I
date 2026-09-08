@@ -3,15 +3,20 @@ package com.example.camera
 import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Context
+import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraMetadata
 import android.hardware.camera2.CaptureRequest
+import android.hardware.camera2.CaptureResult
+import android.hardware.camera2.TotalCaptureResult
+import android.hardware.camera2.params.Face
 import android.media.MediaScannerConnection
 import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
 import android.util.Log
 import android.util.Range
+import android.util.Rational
 import androidx.annotation.OptIn
 import androidx.camera.camera2.interop.Camera2CameraControl
 import androidx.camera.camera2.interop.Camera2CameraInfo
@@ -74,10 +79,51 @@ enum class ResolutionMode(
     RES_480P("480p SD", Quality.SD, "854×480", "Ukuran file kecil")
 }
 
-enum class CameraCaptureMode(val displayName: String) {
-    PHOTO("FOTO"),
-    VIDEO("VIDEO")
+enum class CameraCaptureMode(
+    val id: String,
+    val displayName: String,
+    val isVideo: Boolean = false,
+    val description: String = ""
+) {
+    PORTRAIT(
+        id = "PORTRAIT",
+        displayName = "POTRET",
+        isVideo = false,
+        description = "Mode Potret: Efek kedalaman bokeh & fokus prioritas wajah"
+    ),
+    PHOTO(
+        id = "PHOTO",
+        displayName = "FOTO",
+        isVideo = false,
+        description = "Mode Foto: Resolusi maksimal dengan detail tajam"
+    ),
+    NIGHT(
+        id = "NIGHT",
+        displayName = "MALAM",
+        isVideo = false,
+        description = "Mode Malam: Shutter adaptif & multi-frame noise reduction"
+    ),
+    VIDEO(
+        id = "VIDEO",
+        displayName = "VIDEO",
+        isVideo = true,
+        description = "Mode Video: 60/120 FPS, Bitrate 100 Mbps, & EIS+OIS hardware"
+    ),
+    PRO_VIDEO(
+        id = "PRO_VIDEO",
+        displayName = "PRO VIDEO",
+        isVideo = true,
+        description = "Mode Pro Video: Kontrol Manual ISO, Shutter, WB, Fokus, & Audio"
+    )
 }
+
+data class ProVideoManualSettings(
+    val iso: Int = 0, // 0 = Auto, or 50, 100, 200, 400, 800, 1600, 3200
+    val shutterSpeedNs: Long = 0L, // 0L = Auto, or 1/30s, 1/60s, 1/125s, 1/250s, 1/500s, 1/1000s
+    val awbMode: Int = CameraMetadata.CONTROL_AWB_MODE_AUTO,
+    val focusDistance: Float = -1f, // -1f = Auto Continuous, 0.0f = infinity, 10.0f = macro
+    val audioSource: String = "OMNI" // OMNI, FRONT, REAR
+)
 
 data class CapturedMediaItem(
     val uri: Uri,
@@ -192,16 +238,23 @@ object SamsungCameraHelper {
 
     /**
      * Builds Preview use case.
-     * When enableCamera2Api is TRUE: uses Camera2Interop to explicitly control FPS, Continuous AF,
-     * Anti-Drop FPS Lock, and Video Stabilization (EIS/OIS) following Open Camera's configuration.
+     * Supports:
+     * - Camera2 API with exact FPS range & SENSOR_FRAME_DURATION
+     * - Auto Detect Face (STATISTICS_FACE_DETECT_MODE_SIMPLE)
+     * - AE Lock (CONTROL_AE_LOCK)
+     * - Modes: FOTO, POTRET (scene mode portrait & face priority), MALAM (scene mode night & multi-frame NR), VIDEO (EIS+OIS)
      */
     @OptIn(ExperimentalCamera2Interop::class)
     fun buildPreview(
         targetFpsRange: Range<Int>?,
         isPhotoMode: Boolean,
+        captureMode: CameraCaptureMode = CameraCaptureMode.PHOTO,
         enableCamera2Api: Boolean = true,
         enableStabilization: Boolean = true,
-        lockFpsAntiDrop: Boolean = true
+        lockFpsAntiDrop: Boolean = true,
+        enableFaceDetection: Boolean = true,
+        isAeLocked: Boolean = false,
+        onFacesDetected: ((List<Face>) -> Unit)? = null
     ): Preview {
         val previewBuilder = Preview.Builder()
 
@@ -209,7 +262,7 @@ object SamsungCameraHelper {
             val camera2Extender = Camera2Interop.Extender(previewBuilder)
 
             // 1. Target FPS Range (Strict fixed e.g. [60, 60] preventing low-light drop)
-            if (targetFpsRange != null) {
+            if (targetFpsRange != null && !isPhotoMode) {
                 camera2Extender.setCaptureRequestOption(
                     CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
                     targetFpsRange
@@ -240,23 +293,83 @@ object SamsungCameraHelper {
                 CameraMetadata.CONTROL_AE_ANTIBANDING_MODE_AUTO
             )
 
-            // Open Camera Anti-Drop: disable scene mode & fast noise reduction so 60 FPS never throttles
-            if (lockFpsAntiDrop && !isPhotoMode) {
+            // 3. Auto Detect Face (STATISTICS_FACE_DETECT_MODE)
+            if (enableFaceDetection) {
                 camera2Extender.setCaptureRequestOption(
-                    CaptureRequest.CONTROL_SCENE_MODE,
-                    CameraMetadata.CONTROL_SCENE_MODE_DISABLED
+                    CaptureRequest.STATISTICS_FACE_DETECT_MODE,
+                    CameraMetadata.STATISTICS_FACE_DETECT_MODE_SIMPLE
                 )
+                camera2Extender.setSessionCaptureCallback(object : CameraCaptureSession.CaptureCallback() {
+                    override fun onCaptureCompleted(
+                        session: CameraCaptureSession,
+                        request: CaptureRequest,
+                        result: TotalCaptureResult
+                    ) {
+                        super.onCaptureCompleted(session, request, result)
+                        val faces = result.get(CaptureResult.STATISTICS_FACES)
+                        onFacesDetected?.invoke(faces?.toList() ?: emptyList())
+                    }
+                })
+            } else {
                 camera2Extender.setCaptureRequestOption(
-                    CaptureRequest.NOISE_REDUCTION_MODE,
-                    CameraMetadata.NOISE_REDUCTION_MODE_FAST
-                )
-                camera2Extender.setCaptureRequestOption(
-                    CaptureRequest.EDGE_MODE,
-                    CameraMetadata.EDGE_MODE_FAST
+                    CaptureRequest.STATISTICS_FACE_DETECT_MODE,
+                    CameraMetadata.STATISTICS_FACE_DETECT_MODE_OFF
                 )
             }
 
-            // 3. Hardware Video Stabilization (EIS + OIS)
+            // 4. Penguncian Cahaya (AE Lock)
+            camera2Extender.setCaptureRequestOption(
+                CaptureRequest.CONTROL_AE_LOCK,
+                isAeLocked
+            )
+
+            // 5. Scene Modes & Processing per CameraCaptureMode
+            when (captureMode) {
+                CameraCaptureMode.PORTRAIT -> {
+                    camera2Extender.setCaptureRequestOption(
+                        CaptureRequest.CONTROL_SCENE_MODE,
+                        CameraMetadata.CONTROL_SCENE_MODE_PORTRAIT
+                    )
+                    Log.d(TAG, "Preview Camera2: Mode POTRET (Portrait Scene) applied")
+                }
+                CameraCaptureMode.NIGHT -> {
+                    camera2Extender.setCaptureRequestOption(
+                        CaptureRequest.CONTROL_SCENE_MODE,
+                        CameraMetadata.CONTROL_SCENE_MODE_NIGHT
+                    )
+                    camera2Extender.setCaptureRequestOption(
+                        CaptureRequest.NOISE_REDUCTION_MODE,
+                        CameraMetadata.NOISE_REDUCTION_MODE_HIGH_QUALITY
+                    )
+                    camera2Extender.setCaptureRequestOption(
+                        CaptureRequest.EDGE_MODE,
+                        CameraMetadata.EDGE_MODE_HIGH_QUALITY
+                    )
+                    Log.d(TAG, "Preview Camera2: Mode MALAM (Night Scene + High Quality NR) applied")
+                }
+                CameraCaptureMode.VIDEO,
+                CameraCaptureMode.PRO_VIDEO -> {
+                    if (lockFpsAntiDrop) {
+                        camera2Extender.setCaptureRequestOption(
+                            CaptureRequest.CONTROL_SCENE_MODE,
+                            CameraMetadata.CONTROL_SCENE_MODE_DISABLED
+                        )
+                        camera2Extender.setCaptureRequestOption(
+                            CaptureRequest.NOISE_REDUCTION_MODE,
+                            CameraMetadata.NOISE_REDUCTION_MODE_FAST
+                        )
+                        camera2Extender.setCaptureRequestOption(
+                            CaptureRequest.EDGE_MODE,
+                            CameraMetadata.EDGE_MODE_FAST
+                        )
+                    }
+                }
+                CameraCaptureMode.PHOTO -> {
+                    // Standard photo preview
+                }
+            }
+
+            // 6. Hardware Video Stabilization (EIS + OIS)
             if (enableStabilization && !isPhotoMode) {
                 camera2Extender.setCaptureRequestOption(
                     CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
@@ -275,10 +388,16 @@ object SamsungCameraHelper {
 
     /**
      * Builds ImageCapture use case configured for high quality capture.
+     * In Mode Malam (Night): uses CAPTURE_MODE_MAXIMIZE_QUALITY for best low-light detail.
      */
-    fun buildImageCapture(): ImageCapture {
+    fun buildImageCapture(captureMode: CameraCaptureMode = CameraCaptureMode.PHOTO): ImageCapture {
+        val mode = if (captureMode == CameraCaptureMode.NIGHT) {
+            ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY
+        } else {
+            ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY
+        }
         return ImageCapture.Builder()
-            .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
+            .setCaptureMode(mode)
             .build()
     }
 
@@ -295,7 +414,9 @@ object SamsungCameraHelper {
         bitrateMode: BitrateMode = BitrateMode.BITRATE_100,
         enableCamera2Api: Boolean = true,
         enableStabilization: Boolean = true,
-        lockFpsAntiDrop: Boolean = true
+        lockFpsAntiDrop: Boolean = true,
+        enableFaceDetection: Boolean = true,
+        isAeLocked: Boolean = false
     ): VideoCapture<Recorder> {
         val qualitySelector = QualitySelector.from(
             resolutionMode.quality,
@@ -350,6 +471,22 @@ object SamsungCameraHelper {
                 CameraMetadata.CONTROL_AE_ANTIBANDING_MODE_AUTO
             )
 
+            // Auto Detect Face
+            if (enableFaceDetection) {
+                camera2Extender.setCaptureRequestOption(
+                    CaptureRequest.STATISTICS_FACE_DETECT_MODE,
+                    CameraMetadata.STATISTICS_FACE_DETECT_MODE_SIMPLE
+                )
+            }
+
+            // AE Lock
+            if (isAeLocked) {
+                camera2Extender.setCaptureRequestOption(
+                    CaptureRequest.CONTROL_AE_LOCK,
+                    true
+                )
+            }
+
             // Open Camera Anti-Drop: prevent night scene throttling to 22 FPS
             if (lockFpsAntiDrop) {
                 camera2Extender.setCaptureRequestOption(
@@ -394,7 +531,7 @@ object SamsungCameraHelper {
 
     /**
      * Safely applies camera controls to the active session based on Camera2 API toggle,
-     * Anti-Drop FPS lock, and Video Stabilization state.
+     * Anti-Drop FPS lock, Video Stabilization state, Face Detection, and AE Lock.
      */
     @OptIn(ExperimentalCamera2Interop::class)
     fun applyActiveHardwareSettings(
@@ -402,9 +539,12 @@ object SamsungCameraHelper {
         camera: Camera,
         targetFpsRange: Range<Int>?,
         isPhotoMode: Boolean,
+        captureMode: CameraCaptureMode = CameraCaptureMode.PHOTO,
         enableCamera2Api: Boolean = true,
         enableStabilization: Boolean = true,
-        lockFpsAntiDrop: Boolean = true
+        lockFpsAntiDrop: Boolean = true,
+        enableFaceDetection: Boolean = true,
+        isAeLocked: Boolean = false
     ) {
         try {
             val camera2CameraControl = Camera2CameraControl.from(camera.cameraControl)
@@ -417,7 +557,7 @@ object SamsungCameraHelper {
 
             val builder = CaptureRequestOptions.Builder()
 
-            if (targetFpsRange != null) {
+            if (targetFpsRange != null && !isPhotoMode) {
                 builder.setCaptureRequestOption(
                     CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
                     targetFpsRange
@@ -447,19 +587,67 @@ object SamsungCameraHelper {
                 CameraMetadata.CONTROL_AE_ANTIBANDING_MODE_AUTO
             )
 
-            if (lockFpsAntiDrop && !isPhotoMode) {
+            // Auto Detect Face
+            if (enableFaceDetection) {
                 builder.setCaptureRequestOption(
-                    CaptureRequest.CONTROL_SCENE_MODE,
-                    CameraMetadata.CONTROL_SCENE_MODE_DISABLED
+                    CaptureRequest.STATISTICS_FACE_DETECT_MODE,
+                    CameraMetadata.STATISTICS_FACE_DETECT_MODE_SIMPLE
                 )
+            } else {
                 builder.setCaptureRequestOption(
-                    CaptureRequest.NOISE_REDUCTION_MODE,
-                    CameraMetadata.NOISE_REDUCTION_MODE_FAST
+                    CaptureRequest.STATISTICS_FACE_DETECT_MODE,
+                    CameraMetadata.STATISTICS_FACE_DETECT_MODE_OFF
                 )
-                builder.setCaptureRequestOption(
-                    CaptureRequest.EDGE_MODE,
-                    CameraMetadata.EDGE_MODE_FAST
-                )
+            }
+
+            // Penguncian Cahaya (AE Lock)
+            builder.setCaptureRequestOption(
+                CaptureRequest.CONTROL_AE_LOCK,
+                isAeLocked
+            )
+
+            // Mode-specific scene settings
+            when (captureMode) {
+                CameraCaptureMode.PORTRAIT -> {
+                    builder.setCaptureRequestOption(
+                        CaptureRequest.CONTROL_SCENE_MODE,
+                        CameraMetadata.CONTROL_SCENE_MODE_PORTRAIT
+                    )
+                }
+                CameraCaptureMode.NIGHT -> {
+                    builder.setCaptureRequestOption(
+                        CaptureRequest.CONTROL_SCENE_MODE,
+                        CameraMetadata.CONTROL_SCENE_MODE_NIGHT
+                    )
+                    builder.setCaptureRequestOption(
+                        CaptureRequest.NOISE_REDUCTION_MODE,
+                        CameraMetadata.NOISE_REDUCTION_MODE_HIGH_QUALITY
+                    )
+                    builder.setCaptureRequestOption(
+                        CaptureRequest.EDGE_MODE,
+                        CameraMetadata.EDGE_MODE_HIGH_QUALITY
+                    )
+                }
+                CameraCaptureMode.VIDEO,
+                CameraCaptureMode.PRO_VIDEO -> {
+                    if (lockFpsAntiDrop) {
+                        builder.setCaptureRequestOption(
+                            CaptureRequest.CONTROL_SCENE_MODE,
+                            CameraMetadata.CONTROL_SCENE_MODE_DISABLED
+                        )
+                        builder.setCaptureRequestOption(
+                            CaptureRequest.NOISE_REDUCTION_MODE,
+                            CameraMetadata.NOISE_REDUCTION_MODE_FAST
+                        )
+                        builder.setCaptureRequestOption(
+                            CaptureRequest.EDGE_MODE,
+                            CameraMetadata.EDGE_MODE_FAST
+                        )
+                    }
+                }
+                CameraCaptureMode.PHOTO -> {
+                    // standard
+                }
             }
 
             if (enableStabilization && !isPhotoMode) {
@@ -485,12 +673,132 @@ object SamsungCameraHelper {
             camera2CameraControl.setCaptureRequestOptions(builder.build())
                 .addListener(
                     {
-                        Log.d(TAG, "Hardware settings applied: Camera2=ON, FPS=$targetFpsRange, AF=$afMode, Stab=$enableStabilization")
+                        Log.d(TAG, "Hardware settings applied: Mode=${captureMode.name}, Camera2=ON, FaceDetect=$enableFaceDetection, AELock=$isAeLocked")
                     },
                     ContextCompat.getMainExecutor(context)
                 )
         } catch (e: Exception) {
             Log.e(TAG, "Gagal menerapkan capture request options: ${e.message}")
+        }
+    }
+
+    /**
+     * Toggles hardware Auto Exposure (AE) Lock on or off.
+     */
+    @OptIn(ExperimentalCamera2Interop::class)
+    fun setAeLock(camera: Camera?, isLocked: Boolean) {
+        val cam = camera ?: return
+        try {
+            val camera2Control = Camera2CameraControl.from(cam.cameraControl)
+            val options = CaptureRequestOptions.Builder()
+                .setCaptureRequestOption(CaptureRequest.CONTROL_AE_LOCK, isLocked)
+                .build()
+            camera2Control.setCaptureRequestOptions(options)
+            Log.d(TAG, "AE Lock set to: $isLocked")
+        } catch (e: Exception) {
+            Log.e(TAG, "Gagal mengatur AE Lock: ${e.message}")
+        }
+    }
+
+    /**
+     * Sets exposure compensation index safely within the device's hardware supported range.
+     */
+    fun setExposureCompensation(camera: Camera?, index: Int) {
+        val cam = camera ?: return
+        try {
+            val state = cam.cameraInfo.exposureState
+            if (state.isExposureCompensationSupported) {
+                val clamped = index.coerceIn(state.exposureCompensationRange.lower, state.exposureCompensationRange.upper)
+                cam.cameraControl.setExposureCompensationIndex(clamped)
+                Log.d(TAG, "Exposure compensation index set to $clamped")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Gagal mengatur exposure compensation: ${e.message}")
+        }
+    }
+
+    /**
+     * Applies manual settings (ISO, Shutter Speed, White Balance, Manual Focus) for Mode Pro Video.
+     */
+    @OptIn(ExperimentalCamera2Interop::class)
+    fun applyProVideoSettings(
+        camera: Camera?,
+        settings: ProVideoManualSettings
+    ) {
+        val cam = camera ?: return
+        try {
+            val camera2Control = Camera2CameraControl.from(cam.cameraControl)
+            val builder = CaptureRequestOptions.Builder()
+
+            // 1. Manual ISO & Shutter Speed
+            if (settings.iso > 0 || settings.shutterSpeedNs > 0L) {
+                builder.setCaptureRequestOption(
+                    CaptureRequest.CONTROL_AE_MODE,
+                    CameraMetadata.CONTROL_AE_MODE_OFF
+                )
+                if (settings.iso > 0) {
+                    builder.setCaptureRequestOption(
+                        CaptureRequest.SENSOR_SENSITIVITY,
+                        settings.iso
+                    )
+                }
+                if (settings.shutterSpeedNs > 0L) {
+                    builder.setCaptureRequestOption(
+                        CaptureRequest.SENSOR_EXPOSURE_TIME,
+                        settings.shutterSpeedNs
+                    )
+                }
+            } else {
+                builder.setCaptureRequestOption(
+                    CaptureRequest.CONTROL_AE_MODE,
+                    CameraMetadata.CONTROL_AE_MODE_ON
+                )
+            }
+
+            // 2. White Balance
+            builder.setCaptureRequestOption(
+                CaptureRequest.CONTROL_AWB_MODE,
+                settings.awbMode
+            )
+
+            // 3. Manual Focus
+            if (settings.focusDistance >= 0f) {
+                builder.setCaptureRequestOption(
+                    CaptureRequest.CONTROL_AF_MODE,
+                    CameraMetadata.CONTROL_AF_MODE_OFF
+                )
+                builder.setCaptureRequestOption(
+                    CaptureRequest.LENS_FOCUS_DISTANCE,
+                    settings.focusDistance
+                )
+            } else {
+                builder.setCaptureRequestOption(
+                    CaptureRequest.CONTROL_AF_MODE,
+                    CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_VIDEO
+                )
+            }
+
+            camera2Control.setCaptureRequestOptions(builder.build())
+            Log.d(TAG, "Pro Video Manual Settings applied: ISO=${settings.iso}, Shutter=${settings.shutterSpeedNs}ns, WB=${settings.awbMode}, Focus=${settings.focusDistance}")
+        } catch (e: Exception) {
+            Log.e(TAG, "Gagal menerapkan Pro Video manual settings: ${e.message}")
+        }
+    }
+
+    /**
+     * Formats exposure index into readable EV string (e.g. +0.7 EV, 0.0 EV, -1.3 EV).
+     */
+    fun formatEvString(index: Int, step: Rational?): String {
+        if (step == null || step.denominator == 0) {
+            return if (index > 0) "+$index EV" else "$index EV"
+        }
+        val ev = index * (step.numerator.toFloat() / step.denominator.toFloat())
+        return if (ev > 0.05f) {
+            String.format(Locale.US, "+%.1f EV", ev)
+        } else if (ev < -0.05f) {
+            String.format(Locale.US, "%.1f EV", ev)
+        } else {
+            "0.0 EV"
         }
     }
 
