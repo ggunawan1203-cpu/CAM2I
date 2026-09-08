@@ -6,7 +6,12 @@ import com.example.camera.ResolutionMode
 import com.example.camera.SamsungCameraHelper
 import org.junit.Assert.*
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
 
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [34])
 class ExampleUnitTest {
     @Test
     fun addition_isCorrect() {
@@ -55,4 +60,3 @@ class ExampleUnitTest {
         assertTrue(resolutions.contains(ResolutionMode.RES_480P))
     }
 }
-

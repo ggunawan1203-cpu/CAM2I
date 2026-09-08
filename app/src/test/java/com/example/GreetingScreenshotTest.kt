@@ -20,9 +20,13 @@ class GreetingScreenshotTest {
   @get:Rule val composeTestRule = createComposeRule()
 
   @Test
-  fun greeting_screenshot() {
-    composeTestRule.setContent { MyApplicationTheme { Greeting("Robolectric") } }
+  fun camera_permission_screen_screenshot() {
+    composeTestRule.setContent {
+      MyApplicationTheme {
+        PermissionRequestScreen(onRequestPermissions = {})
+      }
+    }
 
-    composeTestRule.onRoot().captureRoboImage(filePath = "src/test/screenshots/greeting.png")
+    composeTestRule.onRoot().captureRoboImage(filePath = "src/test/screenshots/permission_screen.png")
   }
 }

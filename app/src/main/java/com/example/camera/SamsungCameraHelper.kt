@@ -1,5 +1,6 @@
 package com.example.camera
 
+import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Context
 import android.hardware.camera2.CameraCharacteristics
@@ -60,6 +61,8 @@ enum class CameraCaptureMode(val displayName: String) {
 
 data class CameraHardwareDetails(
     val sensorName: String = "Unknown",
+    val hardwareLevel: String = "UNKNOWN",
+    val isCamera2ApiEnabled: Boolean = true,
     val is60FpsSupported: Boolean = false,
     val availableFpsRanges: List<Range<Int>> = emptyList(),
     val activeFpsRange: Range<Int>? = null,
@@ -77,8 +80,6 @@ object SamsungCameraHelper {
 
     /**
      * Resolves the optimal FPS range strictly supported by the camera hardware.
-     * Prevents passing unsupported ranges like fixed [60, 60] which causes Samsung HAL
-     * 3A algorithm (Autofocus & Exposure) to freeze into fixed focus.
      */
     fun resolveOptimalFpsRange(
         supportedRanges: List<Range<Int>>,
@@ -117,44 +118,54 @@ object SamsungCameraHelper {
     }
 
     /**
-     * Builds Preview use case with optional FPS range and continuous AF mode.
+     * Builds Preview use case.
+     * When enableCamera2Api is TRUE: uses Camera2Interop to explicitly control FPS & Continuous AF.
+     * When enableCamera2Api is FALSE: uses standard CameraX preview.
      */
     @OptIn(ExperimentalCamera2Interop::class)
     fun buildPreview(
         targetFpsRange: Range<Int>?,
-        isPhotoMode: Boolean
+        isPhotoMode: Boolean,
+        enableCamera2Api: Boolean = true
     ): Preview {
         val previewBuilder = Preview.Builder()
-        val camera2Extender = Camera2Interop.Extender(previewBuilder)
 
-        // Set validated FPS range if available
-        if (targetFpsRange != null) {
+        if (enableCamera2Api) {
+            val camera2Extender = Camera2Interop.Extender(previewBuilder)
+
+            // Set validated FPS range if available
+            if (targetFpsRange != null) {
+                camera2Extender.setCaptureRequestOption(
+                    CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
+                    targetFpsRange
+                )
+                Log.d(TAG, "Preview Camera2: CONTROL_AE_TARGET_FPS_RANGE = $targetFpsRange")
+            }
+
+            // Set Continuous AF mode depending on Photo vs Video mode
+            val afMode = if (isPhotoMode) {
+                CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_PICTURE
+            } else {
+                CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_VIDEO
+            }
             camera2Extender.setCaptureRequestOption(
-                CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
-                targetFpsRange
+                CaptureRequest.CONTROL_AF_MODE,
+                afMode
             )
-            Log.d(TAG, "Preview setting CONTROL_AE_TARGET_FPS_RANGE = $targetFpsRange")
-        }
 
-        // Set Continuous AF mode depending on Photo vs Video mode
-        val afMode = if (isPhotoMode) {
-            CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_PICTURE
-        } else {
-            CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_VIDEO
+            camera2Extender.setCaptureRequestOption(
+                CaptureRequest.CONTROL_MODE,
+                CameraMetadata.CONTROL_MODE_AUTO
+            )
+            camera2Extender.setCaptureRequestOption(
+                CaptureRequest.CONTROL_AE_MODE,
+                CameraMetadata.CONTROL_AE_MODE_ON
+            )
+            camera2Extender.setCaptureRequestOption(
+                CaptureRequest.CONTROL_AWB_MODE,
+                CameraMetadata.CONTROL_AWB_MODE_AUTO
+            )
         }
-        camera2Extender.setCaptureRequestOption(
-            CaptureRequest.CONTROL_AF_MODE,
-            afMode
-        )
-
-        camera2Extender.setCaptureRequestOption(
-            CaptureRequest.CONTROL_MODE,
-            CameraMetadata.CONTROL_MODE_AUTO
-        )
-        camera2Extender.setCaptureRequestOption(
-            CaptureRequest.CONTROL_AE_MODE,
-            CameraMetadata.CONTROL_AE_MODE_ON
-        )
 
         return previewBuilder.build()
     }
@@ -184,17 +195,25 @@ object SamsungCameraHelper {
     }
 
     /**
-     * Safely applies camera controls to the active session.
+     * Safely applies camera controls to the active session based on Camera2 API toggle.
      */
     @OptIn(ExperimentalCamera2Interop::class)
     fun applyActiveHardwareSettings(
         context: Context,
         camera: Camera,
         targetFpsRange: Range<Int>?,
-        isPhotoMode: Boolean
+        isPhotoMode: Boolean,
+        enableCamera2Api: Boolean = true
     ) {
         try {
             val camera2CameraControl = Camera2CameraControl.from(camera.cameraControl)
+
+            if (!enableCamera2Api) {
+                camera2CameraControl.clearCaptureRequestOptions()
+                Log.d(TAG, "Camera2 API OFF: Cleared custom capture request options")
+                return
+            }
+
             val builder = CaptureRequestOptions.Builder()
 
             if (targetFpsRange != null) {
@@ -213,11 +232,12 @@ object SamsungCameraHelper {
             builder.setCaptureRequestOption(CaptureRequest.CONTROL_AF_MODE, afMode)
             builder.setCaptureRequestOption(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
             builder.setCaptureRequestOption(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_ON)
+            builder.setCaptureRequestOption(CaptureRequest.CONTROL_AWB_MODE, CameraMetadata.CONTROL_AWB_MODE_AUTO)
 
             camera2CameraControl.setCaptureRequestOptions(builder.build())
                 .addListener(
                     {
-                        Log.d(TAG, "Hardware settings applied: FPS=$targetFpsRange, AF=$afMode")
+                        Log.d(TAG, "Hardware settings applied: Camera2=ON, FPS=$targetFpsRange, AF=$afMode")
                     },
                     ContextCompat.getMainExecutor(context)
                 )
@@ -230,11 +250,23 @@ object SamsungCameraHelper {
      * Triggers active autofocus cycle on Samsung HAL (forces the lens to re-focus).
      */
     @OptIn(ExperimentalCamera2Interop::class)
-    fun triggerAutofocus(camera: Camera, onComplete: () -> Unit = {}) {
+    fun triggerAutofocus(camera: Camera, previewView: PreviewView?, onComplete: () -> Unit = {}) {
         try {
             camera.cameraControl.cancelFocusAndMetering()
-            val camera2CameraControl = Camera2CameraControl.from(camera.cameraControl)
 
+            // If previewView is available, trigger a center focus metering action as standard
+            previewView?.let { pView ->
+                val centerX = pView.width / 2f
+                val centerY = pView.height / 2f
+                val factory = pView.meteringPointFactory
+                val point = factory.createPoint(centerX, centerY)
+                val action = FocusMeteringAction.Builder(point, FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE)
+                    .setAutoCancelDuration(3, TimeUnit.SECONDS)
+                    .build()
+                camera.cameraControl.startFocusAndMetering(action)
+            }
+
+            val camera2CameraControl = Camera2CameraControl.from(camera.cameraControl)
             val triggerOptions = CaptureRequestOptions.Builder()
                 .setCaptureRequestOption(
                     CaptureRequest.CONTROL_AF_TRIGGER,
@@ -252,10 +284,14 @@ object SamsungCameraHelper {
     }
 
     /**
-     * Inspects camera characteristics to read real sensor capabilities.
+     * Inspects camera characteristics to read real sensor capabilities and Camera2 Hardware Level.
      */
     @OptIn(ExperimentalCamera2Interop::class)
-    fun inspectCameraHardware(camera: Camera, activeRange: Range<Int>?): CameraHardwareDetails {
+    fun inspectCameraHardware(
+        camera: Camera,
+        activeRange: Range<Int>?,
+        isCamera2Enabled: Boolean
+    ): CameraHardwareDetails {
         return try {
             val camera2Info = Camera2CameraInfo.from(camera.cameraInfo)
             val fpsRanges = camera2Info.getCameraCharacteristic(
@@ -265,6 +301,18 @@ object SamsungCameraHelper {
             val afModes = camera2Info.getCameraCharacteristic(
                 CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES
             )?.toList() ?: emptyList()
+
+            val hwLevel = camera2Info.getCameraCharacteristic(
+                CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL
+            )
+            val hwLevelString = when (hwLevel) {
+                CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL_LEGACY -> "LEGACY"
+                CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL_LIMITED -> "LIMITED"
+                CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL_FULL -> "FULL"
+                CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL_3 -> "LEVEL_3"
+                CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL_EXTERNAL -> "EXTERNAL"
+                else -> "LIMITED"
+            }
 
             val has60Fps = fpsRanges.any { it.upper >= 60 }
             val hasContinuousAf = afModes.contains(CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_VIDEO) ||
@@ -284,6 +332,8 @@ object SamsungCameraHelper {
 
             CameraHardwareDetails(
                 sensorName = Build.MODEL,
+                hardwareLevel = hwLevelString,
+                isCamera2ApiEnabled = isCamera2Enabled,
                 is60FpsSupported = has60Fps,
                 availableFpsRanges = fpsRanges,
                 activeFpsRange = activeRange,
@@ -296,6 +346,8 @@ object SamsungCameraHelper {
             Log.e(TAG, "Gagal memeriksa CameraCharacteristics: ${e.message}", e)
             CameraHardwareDetails(
                 sensorName = Build.MODEL,
+                hardwareLevel = "LIMITED",
+                isCamera2ApiEnabled = isCamera2Enabled,
                 isSamsungDevice = isSamsungDevice
             )
         }
@@ -340,6 +392,41 @@ object SamsungCameraHelper {
     }
 
     /**
+     * Queries the latest captured photo in MediaStore.
+     */
+    fun queryLatestCapturedPhoto(context: Context): Uri? {
+        val projection = arrayOf(
+            MediaStore.Images.Media._ID,
+            MediaStore.Images.Media.DATE_ADDED
+        )
+        val sortOrder = "${MediaStore.Images.Media.DATE_ADDED} DESC"
+        return try {
+            val cursor = context.contentResolver.query(
+                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                projection,
+                null,
+                null,
+                sortOrder
+            )
+            cursor?.use {
+                if (it.moveToFirst()) {
+                    val idIndex = it.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
+                    val id = it.getLong(idIndex)
+                    ContentUris.withAppendedId(
+                        MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                        id
+                    )
+                } else {
+                    null
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error querying latest photo: ${e.message}")
+            null
+        }
+    }
+
+    /**
      * Takes a high-resolution photo and saves directly to MediaStore Pictures/SamsungCamera.
      */
     fun takePhoto(
@@ -370,7 +457,7 @@ object SamsungCameraHelper {
             ContextCompat.getMainExecutor(context),
             object : ImageCapture.OnImageSavedCallback {
                 override fun onImageSaved(outputFileResults: ImageCapture.OutputFileResults) {
-                    val savedUri = outputFileResults.savedUri ?: Uri.EMPTY
+                    val savedUri = outputFileResults.savedUri ?: queryLatestCapturedPhoto(context) ?: Uri.EMPTY
                     Log.d(TAG, "Foto berhasil disimpan ke $savedUri")
                     onSuccess(savedUri)
                 }

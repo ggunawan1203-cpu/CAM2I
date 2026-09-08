@@ -1,9 +1,11 @@
 package com.example
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
+import android.provider.MediaStore
 import android.util.Range
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -38,6 +40,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -55,14 +58,20 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Cameraswitch
 import androidx.compose.material.icons.filled.CenterFocusStrong
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.FlashOff
 import androidx.compose.material.icons.filled.FlashOn
 import androidx.compose.material.icons.filled.HighQuality
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
+import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.PhotoCamera
+import androidx.compose.material.icons.filled.PhotoLibrary
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Speed
+import androidx.compose.material.icons.filled.ToggleOff
+import androidx.compose.material.icons.filled.ToggleOn
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
@@ -76,7 +85,10 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -95,6 +107,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontFamily
@@ -103,8 +116,11 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import coil.compose.AsyncImage
 import com.example.camera.CameraCaptureMode
 import com.example.camera.CameraHardwareDetails
 import com.example.camera.FpsMode
@@ -202,7 +218,7 @@ fun PermissionRequestScreen(onRequestPermissions: () -> Unit) {
             Spacer(modifier = Modifier.height(24.dp))
 
             Text(
-                text = "Samsung 60 FPS & Autofocus Camera",
+                text = "Samsung Camera2 & 60 FPS",
                 color = Color.White,
                 fontSize = 20.sp,
                 fontWeight = FontWeight.Bold,
@@ -212,7 +228,7 @@ fun PermissionRequestScreen(onRequestPermissions: () -> Unit) {
             Spacer(modifier = Modifier.height(10.dp))
 
             Text(
-                text = "Izin kamera & audio dibutuhkan untuk kontrol Camera2 Interop, perekaman 60 FPS, pilihan resolusi, dan Continuous Autofocus.",
+                text = "Izin kamera & audio dibutuhkan untuk kontrol Camera2 API, perekaman 60 FPS, pilihan resolusi, dan Continuous Autofocus.",
                 color = Color(0xFF94A3B8),
                 fontSize = 14.sp,
                 lineHeight = 20.sp,
@@ -258,7 +274,8 @@ fun SamsungCameraView(
     var previewView by remember { mutableStateOf<PreviewView?>(null) }
 
     // User Selection States
-    var captureMode by remember { mutableStateOf(CameraCaptureMode.VIDEO) }
+    var captureMode by remember { mutableStateOf(CameraCaptureMode.PHOTO) }
+    var isCamera2ApiEnabled by remember { mutableStateOf(true) }
     var selectedFps by remember { mutableStateOf(FpsMode.FPS_60) }
     var selectedResolution by remember { mutableStateOf(ResolutionMode.RES_1080P) }
     var cameraLensFacing by remember { mutableIntStateOf(CameraSelector.LENS_FACING_BACK) }
@@ -271,9 +288,10 @@ fun SamsungCameraView(
     var isPaused by remember { mutableStateOf(false) }
     var recordingDurationSeconds by remember { mutableIntStateOf(0) }
 
-    // Photo Capture Flash Effect State
+    // Photo Capture Flash Effect & Gallery Preview State
     var showPhotoFlash by remember { mutableStateOf(false) }
     var lastCapturedUri by remember { mutableStateOf<Uri?>(null) }
+    var showGalleryViewer by remember { mutableStateOf(false) }
 
     // Hardware specs & Diagnostic
     var hardwareDetails by remember { mutableStateOf(CameraHardwareDetails()) }
@@ -284,6 +302,11 @@ fun SamsungCameraView(
     var tapPoint by remember { mutableStateOf<Offset?>(null) }
     var isFocusing by remember { mutableStateOf(false) }
     var isRefocusingAnimation by remember { mutableStateOf(false) }
+
+    // Query latest photo on startup
+    LaunchedEffect(Unit) {
+        lastCapturedUri = SamsungCameraHelper.queryLatestCapturedPhoto(context)
+    }
 
     // Timer coroutine for recording
     LaunchedEffect(isRecording, isPaused) {
@@ -297,7 +320,7 @@ fun SamsungCameraView(
         }
     }
 
-    // Re-bind camera use cases safely without crashing 3A HAL
+    // Bind camera use cases with Camera2 API option
     fun bindCameraUseCases(pView: PreviewView) {
         val provider = cameraProvider ?: return
         try {
@@ -309,7 +332,11 @@ fun SamsungCameraView(
 
             // Pre-inspect camera to get supported FPS ranges on this sensor
             val initialCam = provider.bindToLifecycle(lifecycleOwner, cameraSelector)
-            val initialSpecs = SamsungCameraHelper.inspectCameraHardware(initialCam, null)
+            val initialSpecs = SamsungCameraHelper.inspectCameraHardware(
+                camera = initialCam,
+                activeRange = null,
+                isCamera2Enabled = isCamera2ApiEnabled
+            )
             provider.unbindAll()
 
             // Resolve real hardware-supported range for the selected FPS mode
@@ -321,10 +348,11 @@ fun SamsungCameraView(
 
             val isPhoto = (captureMode == CameraCaptureMode.PHOTO)
 
-            // 1. Build Preview with validated range
+            // 1. Build Preview with Camera2 API flag
             val preview = SamsungCameraHelper.buildPreview(
                 targetFpsRange = optimalRange,
-                isPhotoMode = isPhoto
+                isPhotoMode = isPhoto,
+                enableCamera2Api = isCamera2ApiEnabled
             )
             preview.surfaceProvider = pView.surfaceProvider
 
@@ -357,16 +385,21 @@ fun SamsungCameraView(
 
             camera = boundCamera
 
-            // 2. Safely apply hardware parameters (FPS & Continuous AF)
+            // 2. Apply Camera2 Hardware Controls (Active AF & FPS or Standard)
             SamsungCameraHelper.applyActiveHardwareSettings(
                 context = context,
                 camera = boundCamera,
                 targetFpsRange = optimalRange,
-                isPhotoMode = isPhoto
+                isPhotoMode = isPhoto,
+                enableCamera2Api = isCamera2ApiEnabled
             )
 
             // 3. Update hardware specs for diagnostic display
-            hardwareDetails = SamsungCameraHelper.inspectCameraHardware(boundCamera, optimalRange)
+            hardwareDetails = SamsungCameraHelper.inspectCameraHardware(
+                camera = boundCamera,
+                activeRange = optimalRange,
+                isCamera2Enabled = isCamera2ApiEnabled
+            )
 
         } catch (e: Exception) {
             Toast.makeText(context, "Inisialisasi kamera: ${e.message}", Toast.LENGTH_SHORT).show()
@@ -383,7 +416,7 @@ fun SamsungCameraView(
     }
 
     // Re-bind when settings change
-    LaunchedEffect(captureMode, selectedFps, selectedResolution, cameraLensFacing) {
+    LaunchedEffect(captureMode, isCamera2ApiEnabled, selectedFps, selectedResolution, cameraLensFacing) {
         if (!isRecording) {
             previewView?.let { bindCameraUseCases(it) }
         }
@@ -441,7 +474,7 @@ fun SamsungCameraView(
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .background(Color.White.copy(alpha = 0.8f))
+                    .background(Color.White.copy(alpha = 0.85f))
             )
         }
 
@@ -478,7 +511,7 @@ fun SamsungCameraView(
             }
         }
 
-        // Quick Action: Floating "Force Re-Focus" Button
+        // Floating "Force Re-Focus" Button
         val refocusScale by animateFloatAsState(
             targetValue = if (isRefocusingAnimation) 1.3f else 1f,
             animationSpec = tween(200),
@@ -488,7 +521,7 @@ fun SamsungCameraView(
             onClick = {
                 camera?.let { cam ->
                     isRefocusingAnimation = true
-                    SamsungCameraHelper.triggerAutofocus(cam) {
+                    SamsungCameraHelper.triggerAutofocus(cam, previewView) {
                         Toast.makeText(context, "Autofocus di-reset (Re-focusing)", Toast.LENGTH_SHORT).show()
                     }
                     coroutineScope.launch {
@@ -514,14 +547,23 @@ fun SamsungCameraView(
             )
         }
 
-        // Top Control Bar with Resolution, FPS, Flash, Diagnostics
+        // Top Control Bar with Camera2 API Toggle, Resolution, FPS, Flash, Diagnostics
         TopHeaderBar(
             captureMode = captureMode,
+            isCamera2ApiEnabled = isCamera2ApiEnabled,
+            hardwareLevel = hardwareDetails.hardwareLevel,
             selectedResolution = selectedResolution,
             selectedFps = selectedFps,
             activeFpsRange = activeFpsRange,
             isRecording = isRecording,
             isTorchOn = isTorchEnabled,
+            onToggleCamera2Api = {
+                if (!isRecording) {
+                    isCamera2ApiEnabled = !isCamera2ApiEnabled
+                    val status = if (isCamera2ApiEnabled) "AKTIF (Continuous AF & 60 FPS Range)" else "NONAKTIF (Standard CameraX)"
+                    Toast.makeText(context, "Camera2 API: $status", Toast.LENGTH_SHORT).show()
+                }
+            },
             onSelectResolution = { selectedResolution = it },
             onSelectFps = { selectedFps = it },
             onToggleTorch = {
@@ -533,10 +575,24 @@ fun SamsungCameraView(
             onOpenInfo = { showInfoDialog = true }
         )
 
-        // Bottom Bar with Mode Selector (FOTO | VIDEO) and Shutter Controls
+        // Bottom Bar with Gallery Preview Button, Mode Selector, and Shutter Controls
         BottomSectionControls(
             modifier = Modifier.align(Alignment.BottomCenter),
             captureMode = captureMode,
+            lastCapturedUri = lastCapturedUri,
+            onOpenGallery = {
+                if (lastCapturedUri != null) {
+                    showGalleryViewer = true
+                } else {
+                    // Open system gallery intent directly
+                    try {
+                        val galleryIntent = Intent(Intent.ACTION_VIEW, MediaStore.Images.Media.EXTERNAL_CONTENT_URI)
+                        context.startActivity(galleryIntent)
+                    } catch (e: Exception) {
+                        Toast.makeText(context, "Belum ada foto yang diambil", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            },
             onModeSelected = { newMode ->
                 if (!isRecording) {
                     captureMode = newMode
@@ -649,10 +705,22 @@ fun SamsungCameraView(
             }
         )
 
+        // Photo Preview Dialog Modal
+        if (showGalleryViewer && lastCapturedUri != null) {
+            PhotoViewerDialog(
+                photoUri = lastCapturedUri!!,
+                onDismiss = { showGalleryViewer = false }
+            )
+        }
+
         // Diagnostic Dialog
         if (showInfoDialog) {
             HardwareInfoDialog(
                 details = hardwareDetails,
+                isCamera2Enabled = isCamera2ApiEnabled,
+                onToggleCamera2 = {
+                    isCamera2ApiEnabled = !isCamera2ApiEnabled
+                },
                 onDismiss = { showInfoDialog = false }
             )
         }
@@ -662,11 +730,14 @@ fun SamsungCameraView(
 @Composable
 fun TopHeaderBar(
     captureMode: CameraCaptureMode,
+    isCamera2ApiEnabled: Boolean,
+    hardwareLevel: String,
     selectedResolution: ResolutionMode,
     selectedFps: FpsMode,
     activeFpsRange: Range<Int>?,
     isRecording: Boolean,
     isTorchOn: Boolean,
+    onToggleCamera2Api: () -> Unit,
     onSelectResolution: (ResolutionMode) -> Unit,
     onSelectFps: (FpsMode) -> Unit,
     onToggleTorch: () -> Unit,
@@ -684,15 +755,49 @@ fun TopHeaderBar(
                 )
             )
             .statusBarsPadding()
-            .padding(horizontal = 12.dp, vertical = 8.dp)
+            .padding(horizontal = 10.dp, vertical = 8.dp)
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Resolution and FPS Selector Pills
+            // Left row: Camera2 API toggle pill & FPS/Resolution
             Row(verticalAlignment = Alignment.CenterVertically) {
+                // Camera2 API Toggle Pill
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(
+                            if (isCamera2ApiEnabled) Color(0xFF0284C7).copy(alpha = 0.85f)
+                            else Color(0xFF334155).copy(alpha = 0.85f)
+                        )
+                        .border(
+                            1.dp,
+                            if (isCamera2ApiEnabled) Color(0xFF38BDF8) else Color(0xFF64748B),
+                            RoundedCornerShape(16.dp)
+                        )
+                        .clickable(enabled = !isRecording) { onToggleCamera2Api() }
+                        .padding(horizontal = 9.dp, vertical = 5.dp)
+                ) {
+                    Icon(
+                        imageVector = if (isCamera2ApiEnabled) Icons.Default.ToggleOn else Icons.Default.ToggleOff,
+                        contentDescription = "Toggle Camera2 API",
+                        tint = if (isCamera2ApiEnabled) Color.White else Color(0xFF94A3B8),
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = if (isCamera2ApiEnabled) "Camera2: ON" else "Camera2: OFF",
+                        color = Color.White,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+
+                Spacer(modifier = Modifier.width(6.dp))
+
                 // Resolution Dropdown Button (Enabled for Video)
                 if (captureMode == CameraCaptureMode.VIDEO) {
                     Box {
@@ -703,19 +808,19 @@ fun TopHeaderBar(
                                 .background(Color(0xFF1E293B).copy(alpha = 0.9f))
                                 .border(1.dp, Color(0xFF0284C7), RoundedCornerShape(16.dp))
                                 .clickable(enabled = !isRecording) { showResolutionMenu = true }
-                                .padding(horizontal = 10.dp, vertical = 6.dp)
+                                .padding(horizontal = 8.dp, vertical = 5.dp)
                         ) {
                             Icon(
                                 imageVector = Icons.Default.HighQuality,
                                 contentDescription = null,
                                 tint = Color(0xFF38BDF8),
-                                modifier = Modifier.size(16.dp)
+                                modifier = Modifier.size(15.dp)
                             )
-                            Spacer(modifier = Modifier.width(4.dp))
+                            Spacer(modifier = Modifier.width(3.dp))
                             Text(
                                 text = selectedResolution.displayName,
                                 color = Color.White,
-                                fontSize = 12.sp,
+                                fontSize = 11.sp,
                                 fontWeight = FontWeight.Bold
                             )
                         }
@@ -759,19 +864,19 @@ fun TopHeaderBar(
                             .background(Color(0xFF1E293B).copy(alpha = 0.9f))
                             .border(1.dp, Color(0xFF10B981), RoundedCornerShape(16.dp))
                             .clickable(enabled = !isRecording) { showFpsMenu = true }
-                            .padding(horizontal = 10.dp, vertical = 6.dp)
+                            .padding(horizontal = 8.dp, vertical = 5.dp)
                     ) {
                         Icon(
                             imageVector = Icons.Default.Speed,
                             contentDescription = null,
                             tint = Color(0xFF10B981),
-                            modifier = Modifier.size(16.dp)
+                            modifier = Modifier.size(15.dp)
                         )
-                        Spacer(modifier = Modifier.width(4.dp))
+                        Spacer(modifier = Modifier.width(3.dp))
                         Text(
                             text = fpsLabel,
                             color = Color.White,
-                            fontSize = 12.sp,
+                            fontSize = 11.sp,
                             fontWeight = FontWeight.Bold,
                             fontFamily = FontFamily.Monospace
                         )
@@ -799,12 +904,12 @@ fun TopHeaderBar(
                 }
             }
 
-            // Right icons: Flash and Info
+            // Right icons: Flash and Info Diagnostics
             Row(verticalAlignment = Alignment.CenterVertically) {
                 IconButton(
                     onClick = onToggleTorch,
                     modifier = Modifier
-                        .size(38.dp)
+                        .size(36.dp)
                         .clip(CircleShape)
                         .background(Color(0xFF1E293B).copy(alpha = 0.7f))
                 ) {
@@ -821,7 +926,7 @@ fun TopHeaderBar(
                 IconButton(
                     onClick = onOpenInfo,
                     modifier = Modifier
-                        .size(38.dp)
+                        .size(36.dp)
                         .clip(CircleShape)
                         .background(Color(0xFF1E293B).copy(alpha = 0.7f))
                 ) {
@@ -841,6 +946,8 @@ fun TopHeaderBar(
 fun BottomSectionControls(
     modifier: Modifier = Modifier,
     captureMode: CameraCaptureMode,
+    lastCapturedUri: Uri?,
+    onOpenGallery: () -> Unit,
     onModeSelected: (CameraCaptureMode) -> Unit,
     isRecording: Boolean,
     isPaused: Boolean,
@@ -868,11 +975,11 @@ fun BottomSectionControls(
             .fillMaxWidth()
             .background(
                 Brush.verticalGradient(
-                    colors = listOf(Color.Transparent, Color.Black.copy(alpha = 0.9f))
+                    colors = listOf(Color.Transparent, Color.Black.copy(alpha = 0.92f))
                 )
             )
             .navigationBarsPadding()
-            .padding(horizontal = 24.dp, vertical = 14.dp),
+            .padding(horizontal = 20.dp, vertical = 14.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         // Video Duration Timer (Visible only when recording)
@@ -984,30 +1091,40 @@ fun BottomSectionControls(
 
         Spacer(modifier = Modifier.height(18.dp))
 
-        // Main Shutter and Auxiliary Buttons
+        // Main Controls Row: Gallery Thumbnail, Shutter Button, Switch Camera
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceAround,
+            horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Audio toggle (for video)
-            IconButton(
-                onClick = onToggleAudio,
-                enabled = (captureMode == CameraCaptureMode.VIDEO),
+            // Left Button: Gallery Thumbnail Button
+            Box(
                 modifier = Modifier
-                    .size(48.dp)
+                    .size(52.dp)
                     .clip(CircleShape)
-                    .background(Color(0xFF1E293B).copy(alpha = 0.7f))
+                    .background(Color(0xFF1E293B).copy(alpha = 0.85f))
+                    .border(2.dp, Color(0xFF0284C7), CircleShape)
+                    .clickable { onOpenGallery() },
+                contentAlignment = Alignment.Center
             ) {
-                Icon(
-                    imageVector = if (isAudioEnabled) Icons.Default.Mic else Icons.Default.MicOff,
-                    contentDescription = "Audio Toggle",
-                    tint = if (isAudioEnabled) Color(0xFF38BDF8) else Color(0xFF94A3B8),
-                    modifier = Modifier.size(22.dp)
-                )
+                if (lastCapturedUri != null) {
+                    AsyncImage(
+                        model = lastCapturedUri,
+                        contentDescription = "Hasil Foto Terakhir",
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                } else {
+                    Icon(
+                        imageVector = Icons.Default.PhotoLibrary,
+                        contentDescription = "Buka Galeri",
+                        tint = Color(0xFF38BDF8),
+                        modifier = Modifier.size(24.dp)
+                    )
+                }
             }
 
-            // Pause / Resume for Video Recording
+            // Audio mic toggle (for video) or Pause button
             if (isRecording) {
                 IconButton(
                     onClick = onPauseResumeRecording,
@@ -1023,11 +1140,28 @@ fun BottomSectionControls(
                         modifier = Modifier.size(26.dp)
                     )
                 }
+            } else if (captureMode == CameraCaptureMode.VIDEO) {
+                IconButton(
+                    onClick = onToggleAudio,
+                    modifier = Modifier
+                        .size(48.dp)
+                        .clip(CircleShape)
+                        .background(Color(0xFF1E293B).copy(alpha = 0.7f))
+                ) {
+                    Icon(
+                        imageVector = if (isAudioEnabled) Icons.Default.Mic else Icons.Default.MicOff,
+                        contentDescription = "Audio Toggle",
+                        tint = if (isAudioEnabled) Color(0xFF38BDF8) else Color(0xFF94A3B8),
+                        modifier = Modifier.size(22.dp)
+                    )
+                }
+            } else {
+                Spacer(modifier = Modifier.width(48.dp))
             }
 
             // Central Shutter Button
             if (captureMode == CameraCaptureMode.PHOTO) {
-                // Photo Shutter Button (White ring with inner white solid circle)
+                // Photo Shutter Button
                 Box(
                     modifier = Modifier
                         .size(76.dp)
@@ -1044,7 +1178,7 @@ fun BottomSectionControls(
                     )
                 }
             } else {
-                // Video Shutter Button (Red circle or square when recording)
+                // Video Shutter Button
                 Box(
                     modifier = Modifier
                         .size(76.dp)
@@ -1076,12 +1210,14 @@ fun BottomSectionControls(
                 }
             }
 
-            // Camera Switcher Button (Back / Front)
+            Spacer(modifier = Modifier.width(48.dp))
+
+            // Right Button: Camera Switcher (Back / Front)
             IconButton(
                 onClick = onSwitchCamera,
                 enabled = !isRecording,
                 modifier = Modifier
-                    .size(48.dp)
+                    .size(52.dp)
                     .clip(CircleShape)
                     .background(Color(0xFF1E293B).copy(alpha = if (isRecording) 0.3f else 0.7f))
             ) {
@@ -1089,8 +1225,122 @@ fun BottomSectionControls(
                     imageVector = Icons.Default.Cameraswitch,
                     contentDescription = "Switch Camera",
                     tint = if (isRecording) Color(0xFF64748B) else Color.White,
-                    modifier = Modifier.size(22.dp)
+                    modifier = Modifier.size(24.dp)
                 )
+            }
+        }
+    }
+}
+
+@Composable
+fun PhotoViewerDialog(
+    photoUri: Uri,
+    onDismiss: () -> Unit
+) {
+    val context = LocalContext.current
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black.copy(alpha = 0.95f))
+        ) {
+            // Main Photo Image
+            AsyncImage(
+                model = photoUri,
+                contentDescription = "Hasil Foto",
+                contentScale = ContentScale.Fit,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(vertical = 80.dp)
+            )
+
+            // Top Bar with Close Button
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .statusBarsPadding()
+                    .padding(16.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "Hasil Foto",
+                    color = Color.White,
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Bold
+                )
+
+                IconButton(
+                    onClick = onDismiss,
+                    modifier = Modifier
+                        .size(40.dp)
+                        .clip(CircleShape)
+                        .background(Color(0xFF1E293B).copy(alpha = 0.8f))
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Close,
+                        contentDescription = "Tutup",
+                        tint = Color.White
+                    )
+                }
+            }
+
+            // Bottom Action Bar: Open in Gallery & Share
+            Row(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .navigationBarsPadding()
+                    .padding(24.dp),
+                horizontalArrangement = Arrangement.spacedBy(16.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Button(
+                    onClick = {
+                        try {
+                            val intent = Intent(Intent.ACTION_VIEW).apply {
+                                setDataAndType(photoUri, "image/*")
+                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            }
+                            context.startActivity(intent)
+                        } catch (e: Exception) {
+                            Toast.makeText(context, "Tidak dapat membuka aplikasi galeri", Toast.LENGTH_SHORT).show()
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF0284C7)),
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Icon(Icons.Default.OpenInNew, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Buka di Galeri", fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                }
+
+                OutlinedButton(
+                    onClick = {
+                        try {
+                            val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                                type = "image/*"
+                                putExtra(Intent.EXTRA_STREAM, photoUri)
+                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            }
+                            context.startActivity(Intent.createChooser(shareIntent, "Bagikan Foto"))
+                        } catch (e: Exception) {
+                            Toast.makeText(context, "Gagal membagikan foto", Toast.LENGTH_SHORT).show()
+                        }
+                    },
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White),
+                    border = ButtonDefaults.outlinedButtonBorder.copy(brush = Brush.horizontalGradient(listOf(Color(0xFF38BDF8), Color(0xFF0284C7)))),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Icon(Icons.Default.Share, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Bagikan")
+                }
             }
         }
     }
@@ -1099,6 +1349,8 @@ fun BottomSectionControls(
 @Composable
 fun HardwareInfoDialog(
     details: CameraHardwareDetails,
+    isCamera2Enabled: Boolean,
+    onToggleCamera2: () -> Unit,
     onDismiss: () -> Unit
 ) {
     AlertDialog(
@@ -1114,7 +1366,7 @@ fun HardwareInfoDialog(
                 )
                 Spacer(modifier = Modifier.width(8.dp))
                 Text(
-                    text = "Samsung Camera2 Diagnostics",
+                    text = "Status Camera2 API & Sensor",
                     color = Color.White,
                     fontSize = 17.sp,
                     fontWeight = FontWeight.Bold
@@ -1127,20 +1379,60 @@ fun HardwareInfoDialog(
                     .fillMaxWidth()
                     .verticalScroll(rememberScrollState())
             ) {
-                Text(
-                    text = "Status Hardware & Sensor:",
-                    color = Color(0xFF38BDF8),
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.SemiBold
-                )
+                // Camera2 API Switch Card
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFF1E293B)),
+                    shape = RoundedCornerShape(10.dp)
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Camera2 API Interop",
+                                color = Color.White,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 14.sp
+                            )
+                            Text(
+                                text = if (isCamera2Enabled) "Aktif: Inject continuous autofocus & 60 FPS range langsung ke HAL" else "Nonaktif: Gunakan CameraX standard pipeline",
+                                color = Color(0xFF94A3B8),
+                                fontSize = 11.sp,
+                                lineHeight = 15.sp
+                            )
+                        }
 
-                Spacer(modifier = Modifier.height(10.dp))
+                        Switch(
+                            checked = isCamera2Enabled,
+                            onCheckedChange = { onToggleCamera2() },
+                            colors = SwitchDefaults.colors(
+                                checkedThumbColor = Color.White,
+                                checkedTrackColor = Color(0xFF0284C7)
+                            )
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
 
                 Card(
                     colors = CardDefaults.cardColors(containerColor = Color(0xFF1E293B)),
                     shape = RoundedCornerShape(8.dp)
                 ) {
                     Column(modifier = Modifier.padding(12.dp)) {
+                        DiagItem(
+                            label = "Camera2 Hardware Level",
+                            value = details.hardwareLevel,
+                            highlightColor = if (details.hardwareLevel in listOf("FULL", "LEVEL_3")) Color(0xFF10B981) else Color(0xFFFBBF24)
+                        )
+                        HorizontalDivider(
+                            modifier = Modifier.padding(vertical = 6.dp),
+                            color = Color(0xFF334155)
+                        )
                         DiagItem(
                             label = "Active FPS Range",
                             value = details.activeFpsRange?.let { "[${it.lower}, ${it.upper}]" } ?: "Auto Negotiated",
@@ -1184,22 +1476,6 @@ fun HardwareInfoDialog(
                 Text(
                     text = fpsText,
                     color = Color.White,
-                    fontSize = 11.sp,
-                    fontFamily = FontFamily.Monospace
-                )
-
-                Spacer(modifier = Modifier.height(10.dp))
-
-                Text(
-                    text = "Mode AF Tersedia:",
-                    color = Color(0xFF94A3B8),
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Medium
-                )
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    text = details.availableAfModes.joinToString(", "),
-                    color = Color(0xFFCBD5E1),
                     fontSize = 11.sp,
                     fontFamily = FontFamily.Monospace
                 )
