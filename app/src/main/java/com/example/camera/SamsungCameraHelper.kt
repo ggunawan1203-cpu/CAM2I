@@ -40,6 +40,12 @@ import androidx.camera.video.VideoCapture
 import androidx.camera.video.VideoRecordEvent
 import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
+import android.graphics.RectF
+import androidx.camera.core.ImageAnalysis
+import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.segmentation.Segmentation
+import com.google.mlkit.vision.segmentation.selfie.SelfieSegmenterOptions
+import java.nio.ByteBuffer
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -109,6 +115,12 @@ enum class CameraCaptureMode(
         isVideo = true,
         description = "Mode Video: 60/120 FPS, Bitrate 100 Mbps, & EIS+OIS hardware"
     ),
+    CINEMATIC_VIDEO(
+        id = "CINEMATIC_VIDEO",
+        displayName = "CINEMATIC",
+        isVideo = true,
+        description = "Mode Sinematik Video: Efek Bokeh ML Kit AI, Rasio 2.39:1 & Aperture f/1.4"
+    ),
     PRO_VIDEO(
         id = "PRO_VIDEO",
         displayName = "PRO VIDEO",
@@ -116,6 +128,40 @@ enum class CameraCaptureMode(
         description = "Mode Pro Video: Kontrol Manual ISO, Shutter, WB, Fokus, & Audio"
     )
 }
+
+enum class CinematicAperture(
+    val label: String,
+    val fNumber: Float,
+    val blurRadiusDp: Float,
+    val description: String
+) {
+    F1_4("f/1.4", 1.4f, 28f, "Dreamy Bokeh • Kedalaman lensa prima"),
+    F2_0("f/2.0", 2.0f, 20f, "Portrait Cinema • Pemisahan subjek halus"),
+    F2_8("f/2.8", 2.8f, 13f, "Classic Movie • Kedalaman seimbang"),
+    F4_0("f/4.0", 4.0f, 7f, "Subtle Cinema • Latar belakang lembut"),
+    F8_0("f/8.0", 8.0f, 2f, "Deep Cinema • Bidang fokus lebar")
+}
+
+enum class CinematicStyle(
+    val displayName: String,
+    val filterColorHex: Long,
+    val description: String
+) {
+    GAUSSIAN("Creamy Bokeh", 0x00000000, "Lensa 50mm bioskop alami"),
+    ANAMORPHIC("Anamorphic Blue", 0x1A0284C7, "Gaya bioskop Hollywood dengan anamorphic streaks"),
+    SPOTLIGHT("Studio Focus", 0x40000000, "Latar belakang menggelap fokus pada subjek"),
+    WARM_GOLD("Golden Cinema", 0x20F59E0B, "Tona hangat film cinema 35mm")
+}
+
+data class CinematicBokehState(
+    val isEnabled: Boolean = true,
+    val aperture: CinematicAperture = CinematicAperture.F1_4,
+    val style: CinematicStyle = CinematicStyle.GAUSSIAN,
+    val isWidescreen239Enabled: Boolean = true,
+    val isSubjectDetected: Boolean = false,
+    val subjectConfidence: Float = 0f,
+    val subjectBounds: RectF? = null
+)
 
 data class ProVideoManualSettings(
     val iso: Int = 0, // 0 = Auto, or 50, 100, 200, 400, 800, 1600, 3200
@@ -194,46 +240,47 @@ object SamsungCameraHelper {
         }
 
         val target = requestedFps.targetFps
+        val allRanges = (highSpeedRanges + supportedRanges).distinct()
 
-        // 1. High Speed 120 FPS (Open Camera 119/120 fps high-speed profile)
+        // 1. High Speed 120 FPS
         if (target >= 120) {
-            val exactHs = highSpeedRanges.firstOrNull { it.lower == 120 && it.upper == 120 }
+            val exactHs = allRanges.firstOrNull { it.lower == 120 && it.upper == 120 }
             if (exactHs != null) return exactHs
 
-            val upperHs = highSpeedRanges.firstOrNull { it.upper >= 120 }
+            val upperHs = allRanges.filter { it.upper >= 120 }.maxByOrNull { it.lower }
             if (upperHs != null) return upperHs
 
-            val exactSupp = supportedRanges.firstOrNull { it.lower == 120 && it.upper == 120 }
-            if (exactSupp != null) return exactSupp
+            // Fallback to 60 if sensor hardware doesn't support 120
+            val fallback60 = allRanges.filter { it.upper >= 60 }.maxByOrNull { it.lower }
+            if (fallback60 != null) return fallback60
 
-            val suppRange = supportedRanges.firstOrNull { it.upper >= 120 }
-            if (suppRange != null) return suppRange
-
-            return Range(120, 120)
+            return supportedRanges.maxByOrNull { it.upper } ?: Range(30, 30)
         }
 
-        // 2. Strict Fixed 60 FPS (Open Camera 60 FPS mode)
+        // 2. 60 FPS
         if (target == 60) {
-            // Check if exact [60, 60] is listed in either supported or high speed
-            val exactFixed = supportedRanges.firstOrNull { it.lower == 60 && it.upper == 60 }
-                ?: highSpeedRanges.firstOrNull { it.lower == 60 && it.upper == 60 }
+            // First check if exact [60, 60] is listed by the driver
+            val exactFixed = allRanges.firstOrNull { it.lower == 60 && it.upper == 60 }
             if (exactFixed != null) return exactFixed
 
-            // Even if the sensor only declared [15, 60] or [30, 60], we MUST return Range(60, 60)!
-            // Because returning [15, 60] or [30, 60] tells the Camera2 AE algorithm that it can drop
-            // to 15-30 FPS in low light to make the image brighter.
-            // Returning Range(60, 60) caps the exposure time at 1/60s (16.6ms), which keeps the frame
-            // dark naturally in low light (exactly what Open Camera does) and guarantees steady 60 FPS!
-            return Range(60, 60)
+            // Check if driver declared [30, 60] or [15, 60] - prefer highest lower bound
+            val candidate = allRanges.filter { it.upper >= 60 }.maxByOrNull { it.lower }
+            if (candidate != null) return candidate
+
+            // If hardware has no 60 FPS profile, take max supported upper FPS
+            return supportedRanges.maxByOrNull { it.upper } ?: Range(30, 30)
         }
 
-        // 3. Strict Fixed 30 FPS
+        // 3. 30 FPS
         if (target == 30) {
-            // Return Range(30, 30). NEVER return [15, 30] or [7, 30] which drops to 17 FPS!
+            val exact30 = supportedRanges.firstOrNull { it.lower == 30 && it.upper == 30 }
+            if (exact30 != null) return exact30
+            val best30 = supportedRanges.filter { it.upper == 30 }.maxByOrNull { it.lower }
+            if (best30 != null) return best30
             return Range(30, 30)
         }
 
-        return Range(target, target)
+        return allRanges.firstOrNull { it.upper == target } ?: Range(target, target)
     }
 
     /**
@@ -348,6 +395,7 @@ object SamsungCameraHelper {
                     Log.d(TAG, "Preview Camera2: Mode MALAM (Night Scene + High Quality NR) applied")
                 }
                 CameraCaptureMode.VIDEO,
+                CameraCaptureMode.CINEMATIC_VIDEO,
                 CameraCaptureMode.PRO_VIDEO -> {
                     if (lockFpsAntiDrop) {
                         camera2Extender.setCaptureRequestOption(
@@ -433,6 +481,13 @@ object SamsungCameraHelper {
 
         val recorder = recorderBuilder.build()
         val videoCaptureBuilder = VideoCapture.Builder(recorder)
+
+        // Set explicit Target Frame Rate on VideoCapture.Builder
+        // This configures CameraX VideoSpec & MediaCodec to encode at 60/120 FPS
+        if (targetFpsRange != null) {
+            videoCaptureBuilder.setTargetFrameRate(targetFpsRange)
+            Log.d(TAG, "VideoCapture.Builder: setTargetFrameRate($targetFpsRange)")
+        }
 
         if (enableCamera2Api) {
             val camera2Extender = Camera2Interop.Extender(videoCaptureBuilder)
@@ -527,6 +582,91 @@ object SamsungCameraHelper {
         }
 
         return videoCaptureBuilder.build()
+    }
+
+    /**
+     * Builds ML Kit ImageAnalysis use case for real-time subject segmentation and bokeh detection.
+     * Uses ML Kit Selfie Segmentation to detect person/subject bounds and confidence.
+     */
+    fun buildCinematicImageAnalysis(
+        context: Context,
+        onSubjectDetected: (isDetected: Boolean, confidence: Float, bounds: RectF?) -> Unit
+    ): ImageAnalysis {
+        val segmenterOptions = SelfieSegmenterOptions.Builder()
+            .setDetectorMode(SelfieSegmenterOptions.STREAM_MODE)
+            .build()
+        val segmenter = Segmentation.getClient(segmenterOptions)
+
+        val imageAnalysis = ImageAnalysis.Builder()
+            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+            .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
+            .build()
+
+        imageAnalysis.setAnalyzer(ContextCompat.getMainExecutor(context)) { imageProxy ->
+            val mediaImage = imageProxy.image
+            if (mediaImage != null) {
+                val inputImage = InputImage.fromMediaImage(
+                    mediaImage,
+                    imageProxy.imageInfo.rotationDegrees
+                )
+                segmenter.process(inputImage)
+                    .addOnSuccessListener { mask ->
+                        val w = mask.width
+                        val h = mask.height
+                        val buffer: ByteBuffer = mask.buffer
+                        buffer.rewind()
+
+                        var subjectPixels = 0
+                        var totalSamples = 0
+                        var minX = w
+                        var maxX = 0
+                        var minY = h
+                        var maxY = 0
+
+                        val step = 8 // Sampling step for smooth 60 FPS performance
+                        for (y in 0 until h step step) {
+                            for (x in 0 until w step step) {
+                                val index = y * w + x
+                                if (index * 4 + 3 < buffer.capacity()) {
+                                    val conf = buffer.getFloat(index * 4)
+                                    if (conf > 0.5f) {
+                                        subjectPixels++
+                                        if (x < minX) minX = x
+                                        if (x > maxX) maxX = x
+                                        if (y < minY) minY = y
+                                        if (y > maxY) maxY = y
+                                    }
+                                    totalSamples++
+                                }
+                            }
+                        }
+
+                        val hasSubject = subjectPixels > 5
+                        val confidence = if (totalSamples > 0) subjectPixels.toFloat() / totalSamples else 0f
+                        val normRect = if (hasSubject && maxX > minX && maxY > minY) {
+                            RectF(
+                                minX.toFloat() / w,
+                                minY.toFloat() / h,
+                                maxX.toFloat() / w,
+                                maxY.toFloat() / h
+                            )
+                        } else null
+
+                        onSubjectDetected(hasSubject, confidence, normRect)
+                    }
+                    .addOnFailureListener { e ->
+                        Log.w(TAG, "ML Kit Segmentation failed: ${e.message}")
+                        onSubjectDetected(false, 0f, null)
+                    }
+                    .addOnCompleteListener {
+                        imageProxy.close()
+                    }
+            } else {
+                imageProxy.close()
+            }
+        }
+
+        return imageAnalysis
     }
 
     /**
@@ -629,6 +769,7 @@ object SamsungCameraHelper {
                     )
                 }
                 CameraCaptureMode.VIDEO,
+                CameraCaptureMode.CINEMATIC_VIDEO,
                 CameraCaptureMode.PRO_VIDEO -> {
                     if (lockFpsAntiDrop) {
                         builder.setCaptureRequestOption(

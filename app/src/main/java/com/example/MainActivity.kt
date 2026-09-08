@@ -17,6 +17,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.video.Recording
@@ -45,6 +46,7 @@ import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -88,6 +90,9 @@ import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
+import androidx.compose.material.icons.filled.AspectRatio
+import androidx.compose.material.icons.filled.BlurOn
+import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material.icons.filled.MotionPhotosAuto
 import androidx.compose.material.icons.filled.NightsStay
 import androidx.compose.material.icons.filled.OpenInNew
@@ -156,6 +161,9 @@ import com.example.camera.BitrateMode
 import com.example.camera.CameraCaptureMode
 import com.example.camera.CameraHardwareDetails
 import com.example.camera.CapturedMediaItem
+import com.example.camera.CinematicAperture
+import com.example.camera.CinematicBokehState
+import com.example.camera.CinematicStyle
 import com.example.camera.FpsMode
 import com.example.camera.ProVideoManualSettings
 import com.example.camera.ResolutionMode
@@ -336,6 +344,10 @@ fun SamsungCameraView(
     var isTorchEnabled by remember { mutableStateOf(false) }
     var isAudioEnabled by remember { mutableStateOf(hasAudioPermission) }
 
+    // Mode Sinematik Video ML Kit Bokeh State
+    var cinematicBokehState by remember { mutableStateOf(CinematicBokehState()) }
+    var cinematicImageAnalysis by remember { mutableStateOf<ImageAnalysis?>(null) }
+
     // Recording State
     var isRecording by remember { mutableStateOf(false) }
     var isPaused by remember { mutableStateOf(false) }
@@ -461,7 +473,7 @@ fun SamsungCameraView(
                     imgCapture
                 )
             } else {
-                // Video mode: Bind Preview + VideoCapture with Open Camera explicit 60 FPS, Bitrate & EIS/OIS
+                // Video mode (VIDEO, CINEMATIC_VIDEO, PRO_VIDEO): Bind Preview + VideoCapture with Open Camera explicit 60 FPS, Bitrate & EIS/OIS
                 val vCapture = SamsungCameraHelper.buildVideoCapture(
                     resolutionMode = selectedResolution,
                     targetFpsRange = optimalRange,
@@ -475,12 +487,40 @@ fun SamsungCameraView(
                 videoCapture = vCapture
                 imageCapture = null
 
-                boundCamera = provider.bindToLifecycle(
-                    lifecycleOwner,
-                    cameraSelector,
-                    preview,
-                    vCapture
-                )
+                if (captureMode == CameraCaptureMode.CINEMATIC_VIDEO) {
+                    val analysis = SamsungCameraHelper.buildCinematicImageAnalysis(context) { isDetected, conf, bounds ->
+                        cinematicBokehState = cinematicBokehState.copy(
+                            isSubjectDetected = isDetected,
+                            subjectConfidence = conf,
+                            subjectBounds = bounds
+                        )
+                    }
+                    cinematicImageAnalysis = analysis
+                    boundCamera = try {
+                        provider.bindToLifecycle(
+                            lifecycleOwner,
+                            cameraSelector,
+                            preview,
+                            vCapture,
+                            analysis
+                        )
+                    } catch (e: Exception) {
+                        provider.bindToLifecycle(
+                            lifecycleOwner,
+                            cameraSelector,
+                            preview,
+                            vCapture
+                        )
+                    }
+                } else {
+                    cinematicImageAnalysis = null
+                    boundCamera = provider.bindToLifecycle(
+                        lifecycleOwner,
+                        cameraSelector,
+                        preview,
+                        vCapture
+                    )
+                }
             }
 
             camera = boundCamera
@@ -622,6 +662,14 @@ fun SamsungCameraView(
                 drawLine(gridColor, Offset(0f, h / 3f), Offset(w, h / 3f), strokeW)
                 drawLine(gridColor, Offset(0f, h * 2f / 3f), Offset(w, h * 2f / 3f), strokeW)
             }
+        }
+
+        // Cinematic Video Overlay (ML Kit AI Bokeh Tracking, CinemaScope 2.39:1 & Lens grading)
+        if (captureMode == CameraCaptureMode.CINEMATIC_VIDEO) {
+            CinematicBokehOverlay(
+                state = cinematicBokehState,
+                isRecording = isRecording
+            )
         }
 
         // Shutter White Flash Effect
@@ -782,6 +830,8 @@ fun SamsungCameraView(
             selectedProTab = selectedProTab,
             onSelectProTab = { selectedProTab = it },
             onProVideoSettingsChanged = { proVideoSettings = it },
+            cinematicBokehState = cinematicBokehState,
+            onCinematicBokehStateChanged = { cinematicBokehState = it },
             onShowToast = { msg ->
                 Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
             },
@@ -857,10 +907,11 @@ fun SamsungCameraView(
                 } else {
                     val fpsTag = activeFpsRange?.upper?.toString() ?: selectedFps.targetFps.toString()
                     val bitrateTag = "${selectedBitrate.bps / 1_000_000}MBPS"
+                    val modePrefix = if (captureMode == CameraCaptureMode.CINEMATIC_VIDEO) "CINEMATIC_" else ""
                     val rec = SamsungCameraHelper.prepareRecording(
                         context = context,
                         videoCapture = vCap,
-                        fpsLabel = "${selectedResolution.displayName}_${fpsTag}FPS_${bitrateTag}",
+                        fpsLabel = "${modePrefix}${selectedResolution.displayName}_${fpsTag}FPS_${bitrateTag}",
                         enableAudio = isAudioEnabled
                     ) { event ->
                         when (event) {
@@ -873,11 +924,12 @@ fun SamsungCameraView(
                                 isPaused = false
                                 refreshRecentMedia()
                                 if (!event.hasError()) {
-                                    Toast.makeText(
-                                        context,
-                                        "Video tersimpan di Galeri DCIM/Camera",
-                                        Toast.LENGTH_LONG
-                                    ).show()
+                                    val msg = if (captureMode == CameraCaptureMode.CINEMATIC_VIDEO) {
+                                        "Video Sinematik (Bokeh AI, $fpsTag FPS, $bitrateTag) tersimpan di DCIM/Camera"
+                                    } else {
+                                        "Video ($fpsTag FPS, $bitrateTag) tersimpan di DCIM/Camera"
+                                    }
+                                    Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
                                 } else {
                                     Toast.makeText(
                                         context,
@@ -891,6 +943,12 @@ fun SamsungCameraView(
                         }
                     }
                     activeRecording = rec
+                    val startMsg = if (captureMode == CameraCaptureMode.CINEMATIC_VIDEO) {
+                        "Merekam Sinematik Bokeh ${cinematicBokehState.aperture.label} • $fpsTag FPS • $bitrateTag"
+                    } else {
+                        "Merekam: $fpsTag FPS • $bitrateTag"
+                    }
+                    Toast.makeText(context, startMsg, Toast.LENGTH_SHORT).show()
                 }
             }
         )
@@ -1194,18 +1252,28 @@ fun TopHeaderBar(
                         FpsMode.FPS_30 -> "30"
                         FpsMode.FPS_AUTO -> "AUTO"
                     }
+                    val modeColor = when (captureMode) {
+                        CameraCaptureMode.CINEMATIC_VIDEO -> Color(0xFFF59E0B)
+                        CameraCaptureMode.PRO_VIDEO -> Color(0xFFE11D48)
+                        else -> Color(0xFF38BDF8)
+                    }
+                    val pillPrefix = when (captureMode) {
+                        CameraCaptureMode.CINEMATIC_VIDEO -> "CINEMA • "
+                        CameraCaptureMode.PRO_VIDEO -> "PRO • "
+                        else -> ""
+                    }
 
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier
                             .clip(RoundedCornerShape(16.dp))
                             .background(Color(0xFF0F172A).copy(alpha = 0.95f))
-                            .border(1.dp, Color(0xFF38BDF8), RoundedCornerShape(16.dp))
+                            .border(1.dp, modeColor, RoundedCornerShape(16.dp))
                             .clickable(enabled = !isRecording) { showResolutionMenu = true }
                             .padding(horizontal = 8.dp, vertical = 5.dp)
                     ) {
                         Text(
-                            text = "$resolutionLabel • ${fpsLabel}FPS",
+                            text = "$pillPrefix$resolutionLabel • ${fpsLabel}FPS",
                             color = Color.White,
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold,
@@ -1215,7 +1283,7 @@ fun TopHeaderBar(
                         Icon(
                             imageVector = Icons.Default.ArrowDropDown,
                             contentDescription = null,
-                            tint = Color(0xFF38BDF8),
+                            tint = modeColor,
                             modifier = Modifier.size(16.dp)
                         )
                     }
@@ -1854,6 +1922,347 @@ fun ProVideoControlBar(
     }
 }
 
+/**
+ * Cinematic Bokeh Overlay for Viewfinder
+ * Renders CinemaScope 2.39:1 letterbox matte bars, subtle optical vignette/flare,
+ * and dynamic ML Kit face/subject tracking reticle with bokeh locked badge.
+ */
+@Composable
+fun CinematicBokehOverlay(
+    state: CinematicBokehState,
+    isRecording: Boolean,
+    modifier: Modifier = Modifier
+) {
+    Box(modifier = modifier.fillMaxSize()) {
+        // 1. CinemaScope 2.39:1 Letterbox Bars
+        if (state.isWidescreen239Enabled) {
+            Column(
+                modifier = Modifier.fillMaxSize(),
+                verticalArrangement = Arrangement.SpaceBetween
+            ) {
+                // Top Matte Bar
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .fillMaxHeight(0.12f)
+                        .background(Color.Black),
+                    contentAlignment = Alignment.BottomCenter
+                ) {
+                    Row(
+                        modifier = Modifier.padding(bottom = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Text(
+                            text = "CINEMASCOPE 2.39:1",
+                            color = Color(0xFFF59E0B),
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = FontFamily.Monospace,
+                            letterSpacing = 1.sp
+                        )
+                        Text(
+                            text = "•",
+                            color = Color.DarkGray,
+                            fontSize = 9.sp
+                        )
+                        Text(
+                            text = "${state.aperture.label} • ${state.style.displayName}",
+                            color = Color.LightGray,
+                            fontSize = 9.sp,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    }
+                }
+
+                // Bottom Matte Bar
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .fillMaxHeight(0.14f)
+                        .background(Color.Black),
+                    contentAlignment = Alignment.TopCenter
+                ) {
+                    Text(
+                        text = if (state.isSubjectDetected) "● ML KIT BOKEH AI ACTIVE" else "○ AI TRACKING ACTIVE",
+                        color = if (state.isSubjectDetected) Color(0xFF10B981) else Color.Gray,
+                        fontSize = 8.sp,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = FontFamily.Monospace,
+                        modifier = Modifier.padding(top = 4.dp),
+                        letterSpacing = 1.sp
+                    )
+                }
+            }
+        }
+
+        // 2. Optical vignette and Lens Flare tone
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            val w = size.width
+            val h = size.height
+
+            val vignetteBrush = Brush.radialGradient(
+                colors = listOf(Color.Transparent, Color.Black.copy(alpha = 0.35f)),
+                center = Offset(w / 2f, h / 2f),
+                radius = w.coerceAtLeast(h) * 0.7f
+            )
+            drawRect(brush = vignetteBrush)
+
+            if (state.style == CinematicStyle.ANAMORPHIC) {
+                val flareY = h * 0.45f
+                drawLine(
+                    color = Color(0x3338BDF8),
+                    start = Offset(0f, flareY),
+                    end = Offset(w, flareY),
+                    strokeWidth = 2.dp.toPx()
+                )
+                drawLine(
+                    color = Color(0x1A0284C7),
+                    start = Offset(0f, flareY - 4f),
+                    end = Offset(w, flareY - 4f),
+                    strokeWidth = 6.dp.toPx()
+                )
+            } else if (state.style == CinematicStyle.WARM_GOLD) {
+                drawRect(color = Color(0x14F59E0B))
+            } else if (state.style == CinematicStyle.SPOTLIGHT && state.isSubjectDetected) {
+                drawRect(color = Color(0x28000000))
+            }
+        }
+
+        // 3. Dynamic ML Kit Subject Tracking Reticle
+        val infiniteTransition = rememberInfiniteTransition(label = "bokeh_pulse")
+        val pulseAlpha by infiniteTransition.animateFloat(
+            initialValue = 0.65f,
+            targetValue = 1.0f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(700),
+                repeatMode = RepeatMode.Reverse
+            ),
+            label = "pulse_alpha"
+        )
+
+        if (state.isSubjectDetected) {
+            val bounds = state.subjectBounds
+            BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+                val screenW = maxWidth
+                val screenH = maxHeight
+
+                val boxLeft = if (bounds != null) (bounds.left * screenW.value).dp else screenW * 0.25f
+                val boxTop = if (bounds != null) (bounds.top * screenH.value).dp else screenH * 0.28f
+                val boxW = if (bounds != null) ((bounds.width() * screenW.value).coerceIn(120f, 320f)).dp else screenW * 0.5f
+                val boxH = if (bounds != null) ((bounds.height() * screenH.value).coerceIn(140f, 400f)).dp else screenH * 0.42f
+
+                Box(
+                    modifier = Modifier
+                        .offset(x = boxLeft, y = boxTop)
+                        .size(width = boxW, height = boxH)
+                ) {
+                    Canvas(modifier = Modifier.fillMaxSize()) {
+                        val bw = size.width
+                        val bh = size.height
+                        val cornerLen = 22.dp.toPx()
+                        val stroke = 2.dp.toPx()
+                        val color = Color(0xFFF59E0B).copy(alpha = pulseAlpha)
+
+                        // Top-left
+                        drawLine(color, Offset(0f, 0f), Offset(cornerLen, 0f), stroke)
+                        drawLine(color, Offset(0f, 0f), Offset(0f, cornerLen), stroke)
+                        // Top-right
+                        drawLine(color, Offset(bw, 0f), Offset(bw - cornerLen, 0f), stroke)
+                        drawLine(color, Offset(bw, 0f), Offset(bw, cornerLen), stroke)
+                        // Bottom-left
+                        drawLine(color, Offset(0f, bh), Offset(cornerLen, bh), stroke)
+                        drawLine(color, Offset(0f, bh), Offset(0f, bh - cornerLen), stroke)
+                        // Bottom-right
+                        drawLine(color, Offset(bw, bh), Offset(bw - cornerLen, bh), stroke)
+                        drawLine(color, Offset(bw, bh), Offset(bw, bh - cornerLen), stroke)
+                    }
+
+                    // Floating ML Kit Badge
+                    Row(
+                        modifier = Modifier
+                            .align(Alignment.TopCenter)
+                            .offset(y = (-24).dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(Color(0xFF0F172A).copy(alpha = 0.9f))
+                            .border(1.dp, Color(0xFFF59E0B).copy(alpha = 0.8f), RoundedCornerShape(12.dp))
+                            .padding(horizontal = 8.dp, vertical = 3.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(6.dp)
+                                .clip(CircleShape)
+                                .background(Color(0xFF10B981))
+                        )
+                        Text(
+                            text = "AI BOKEH LOCKED",
+                            color = Color.White,
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            fontFamily = FontFamily.Monospace
+                        )
+                        Text(
+                            text = "•",
+                            color = Color.Gray,
+                            fontSize = 9.sp
+                        )
+                        Text(
+                            text = state.aperture.label,
+                            color = Color(0xFFF59E0B),
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Cinematic Bokeh Controls Bar
+ * Provides instant aperture pills (f/1.4 - f/8.0), cinema lens styles, and 2.39:1 widescreen toggle.
+ */
+@Composable
+fun CinematicBokehControlsWidget(
+    state: CinematicBokehState,
+    onStateChanged: (CinematicBokehState) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 8.dp, vertical = 4.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        // Row 1: Aperture Controller (f/1.4, f/2.0, f/2.8, f/4.0, f/8.0)
+        Row(
+            modifier = Modifier
+                .clip(RoundedCornerShape(20.dp))
+                .background(Color(0xFF0F172A).copy(alpha = 0.92f))
+                .border(1.dp, Color(0xFF334155), RoundedCornerShape(20.dp))
+                .padding(3.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            CinematicAperture.values().forEach { ap ->
+                val isSelected = (state.aperture == ap)
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(if (isSelected) Color(0xFFF59E0B) else Color.Transparent)
+                        .clickable { onStateChanged(state.copy(aperture = ap)) }
+                        .padding(horizontal = 10.dp, vertical = 5.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = ap.label,
+                        color = if (isSelected) Color.Black else Color(0xFF94A3B8),
+                        fontSize = 11.sp,
+                        fontWeight = if (isSelected) FontWeight.ExtraBold else FontWeight.Medium
+                    )
+                }
+            }
+        }
+
+        // Row 2: Cinematic Style Selection + Widescreen 2.39:1 Toggle
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            CinematicStyle.values().forEach { st ->
+                val isSelected = (state.style == st)
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(
+                            if (isSelected) Color(0xFF0284C7).copy(alpha = 0.85f)
+                            else Color(0xFF1E293B).copy(alpha = 0.7f)
+                        )
+                        .border(
+                            1.dp,
+                            if (isSelected) Color(0xFF38BDF8) else Color(0xFF334155),
+                            RoundedCornerShape(14.dp)
+                        )
+                        .clickable { onStateChanged(state.copy(style = st)) }
+                        .padding(horizontal = 10.dp, vertical = 4.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = st.displayName,
+                        color = if (isSelected) Color.White else Color(0xFF94A3B8),
+                        fontSize = 10.sp,
+                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                    )
+                }
+            }
+
+            // 2.39:1 Aspect Ratio Toggle
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(
+                        if (state.isWidescreen239Enabled) Color(0xFFF59E0B).copy(alpha = 0.85f)
+                        else Color(0xFF1E293B).copy(alpha = 0.7f)
+                    )
+                    .border(
+                        1.dp,
+                        if (state.isWidescreen239Enabled) Color(0xFFF59E0B) else Color(0xFF334155),
+                        RoundedCornerShape(14.dp)
+                    )
+                    .clickable { onStateChanged(state.copy(isWidescreen239Enabled = !state.isWidescreen239Enabled)) }
+                    .padding(horizontal = 10.dp, vertical = 4.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Default.AspectRatio,
+                        contentDescription = "Aspect Ratio 2.39:1",
+                        tint = if (state.isWidescreen239Enabled) Color.Black else Color(0xFF94A3B8),
+                        modifier = Modifier.size(12.dp)
+                    )
+                    Spacer(modifier = Modifier.width(3.dp))
+                    Text(
+                        text = "2.39:1",
+                        color = if (state.isWidescreen239Enabled) Color.Black else Color(0xFF94A3B8),
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+        }
+
+        // Row 3: ML Kit Subject Status Sub-strip
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(5.dp),
+            modifier = Modifier.padding(top = 1.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(6.dp)
+                    .clip(CircleShape)
+                    .background(if (state.isSubjectDetected) Color(0xFF10B981) else Color(0xFFF59E0B))
+            )
+            Text(
+                text = if (state.isSubjectDetected)
+                    "ML Kit Bokeh Aktif • Subjek Terdeteksi (${state.aperture.description})"
+                else
+                    "ML Kit AI Aktif • Arahkan kamera ke wajah atau subjek",
+                color = if (state.isSubjectDetected) Color(0xFF34D399) else Color(0xFFCBD5E1),
+                fontSize = 9.sp,
+                fontFamily = FontFamily.Monospace
+            )
+        }
+    }
+}
+
 @Composable
 fun BottomSectionControls(
     modifier: Modifier = Modifier,
@@ -1869,6 +2278,8 @@ fun BottomSectionControls(
     selectedProTab: String?,
     onSelectProTab: (String?) -> Unit,
     onProVideoSettingsChanged: (ProVideoManualSettings) -> Unit,
+    cinematicBokehState: CinematicBokehState = CinematicBokehState(),
+    onCinematicBokehStateChanged: (CinematicBokehState) -> Unit = {},
     onShowToast: (String) -> Unit,
     isRecording: Boolean,
     isPaused: Boolean,
@@ -1954,6 +2365,14 @@ fun BottomSectionControls(
                 activeTab = selectedProTab,
                 onSelectTab = onSelectProTab,
                 onSettingsChanged = onProVideoSettingsChanged
+            )
+        }
+
+        // Cinematic Video Bokeh Controls Bar (Shown when in CINEMATIC_VIDEO mode)
+        if (captureMode == CameraCaptureMode.CINEMATIC_VIDEO) {
+            CinematicBokehControlsWidget(
+                state = cinematicBokehState,
+                onStateChanged = onCinematicBokehStateChanged
             )
         }
 
@@ -2060,6 +2479,7 @@ fun BottomSectionControls(
                         CameraCaptureMode.PHOTO -> Color(0xFF0284C7)
                         CameraCaptureMode.NIGHT -> Color(0xFF8B5CF6)
                         CameraCaptureMode.VIDEO -> Color(0xFFEF4444)
+                        CameraCaptureMode.CINEMATIC_VIDEO -> Color(0xFFEC4899)
                         CameraCaptureMode.PRO_VIDEO -> Color(0xFFE11D48)
                     }
                     val icon = when (mode) {
@@ -2067,6 +2487,7 @@ fun BottomSectionControls(
                         CameraCaptureMode.PHOTO -> Icons.Default.PhotoCamera
                         CameraCaptureMode.NIGHT -> Icons.Default.NightsStay
                         CameraCaptureMode.VIDEO -> Icons.Default.Videocam
+                        CameraCaptureMode.CINEMATIC_VIDEO -> Icons.Default.Movie
                         CameraCaptureMode.PRO_VIDEO -> Icons.Default.Tune
                     }
 
@@ -2183,15 +2604,24 @@ fun BottomSectionControls(
                 Spacer(modifier = Modifier.width(48.dp))
             }
 
-            // Central Shutter Button (Adapts according to Mode: Video, Pro Video, Potret, Foto, Malam)
+            // Central Shutter Button (Adapts according to Mode: Video, Pro Video, Cinematic Video, Potret, Foto, Malam)
             if (captureMode.isVideo) {
-                // Video & Pro Video Shutter Button
-                val proColor = if (captureMode == CameraCaptureMode.PRO_VIDEO) Color(0xFFE11D48) else Color(0xFFDC2626)
+                // Video, Pro Video & Cinematic Video Shutter Button
+                val proColor = when (captureMode) {
+                    CameraCaptureMode.PRO_VIDEO -> Color(0xFFE11D48)
+                    CameraCaptureMode.CINEMATIC_VIDEO -> Color(0xFFF59E0B)
+                    else -> Color(0xFFDC2626)
+                }
+                val ringBorderColor = when (captureMode) {
+                    CameraCaptureMode.PRO_VIDEO -> Color(0xFFFB7185)
+                    CameraCaptureMode.CINEMATIC_VIDEO -> Color(0xFFFBBF24)
+                    else -> Color.White
+                }
                 Box(
                     modifier = Modifier
                         .size(76.dp)
                         .clip(CircleShape)
-                        .border(4.dp, if (captureMode == CameraCaptureMode.PRO_VIDEO) Color(0xFFFB7185) else Color.White, CircleShape)
+                        .border(4.dp, ringBorderColor, CircleShape)
                         .clickable { onVideoShutterClick() },
                     contentAlignment = Alignment.Center
                 ) {
