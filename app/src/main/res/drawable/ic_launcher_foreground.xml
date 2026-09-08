@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Camera Body / Lens Outer Ring -->
+    <path
+        android:pathData="M38,32 L70,32 A8,8 0 0,1 78,40 L78,68 A8,8 0 0,1 70,76 L38,76 A8,8 0 0,1 30,40 L30,40 A8,8 0 0,1 38,32 Z"
+        android:fillColor="#1E293B"
+        android:strokeColor="#38BDF8"
+        android:strokeWidth="2.5" />
+
+    <!-- Lens Glass Circle -->
+    <path
+        android:pathData="M54,42 A12,12 0 1,0 54,66 A12,12 0 1,0 54,42"
+        android:fillColor="#0284C7"
+        android:strokeColor="#E0F2FE"
+        android:strokeWidth="2" />
+
+    <!-- Lens Inner Aperture Highlight -->
+    <path
+        android:pathData="M54,48 A6,6 0 1,0 54,60 A6,6 0 1,0 54,48"
+        android:fillColor="#38BDF8" />
+
+    <!-- Red Recording / 60 FPS Indicator Dot -->
+    <path
+        android:pathData="M70,38 A3,3 0 1,0 70,44 A3,3 0 1,0 70,38"
+        android:fillColor="#EF4444" />
+
+    <!-- 60 FPS Badge Banner at Bottom -->
+    <path
+        android:pathData="M36,73 L72,73 A3,3 0 0,1 75,76 L75,81 A3,3 0 0,1 72,84 L36,84 A3,3 0 0,1 33,81 L33,76 A3,3 0 0,1 36,73 Z"
+        android:fillColor="#0284C7" />
+
+    <!-- "60" Markings -->
+    <path
+        android:pathData="M44,76 L44,81 M44,76 L47,76 M44,78.5 L47,78.5 M44,81 L47,81 M47,78.5 L47,81"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="0.9" />
+
+    <!-- "0" Markings -->
+    <path
+        android:pathData="M50,76 L53,76 L53,81 L50,81 Z"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="0.9" />
+
+    <!-- "FPS" Accent Dot -->
+    <path
+        android:pathData="M58,76 L64,76 M58,78.5 L62,78.5 M58,76 L58,81"
+        android:strokeColor="#38BDF8"
+        android:strokeWidth="0.9" />
+</vector>

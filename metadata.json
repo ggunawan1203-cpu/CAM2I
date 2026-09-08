@@ -1,0 +1,6 @@
+{
+  "name": "Samsung 60FPS Camera",
+  "description": "Aplikasi kamera Android native yang dioptimalkan untuk Samsung dengan CameraX dan Camera2 Interop untuk mengatasi masalah fokus terkunci pada mode 60 FPS.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
