@@ -5,6 +5,7 @@ import android.content.Context
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraMetadata
 import android.hardware.camera2.CaptureRequest
+import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
 import android.util.Log
@@ -18,6 +19,8 @@ import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraControl
 import androidx.camera.core.FocusMeteringAction
+import androidx.camera.core.ImageCapture
+import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.Preview
 import androidx.camera.video.FallbackStrategy
 import androidx.camera.video.MediaStoreOutputOptions
@@ -35,17 +38,34 @@ import java.util.Date
 import java.util.Locale
 import java.util.concurrent.TimeUnit
 
-private const val TAG = "Samsung60FpsCamera"
+private const val TAG = "SamsungCameraHelper"
 
-/**
- * Diagnostic data containing camera hardware details detected from Samsung HAL.
- */
+enum class FpsMode(val displayName: String, val targetFps: Int) {
+    FPS_60("60 FPS", 60),
+    FPS_30("30 FPS", 30),
+    FPS_AUTO("Auto FPS", 0)
+}
+
+enum class ResolutionMode(val displayName: String, val quality: Quality, val description: String) {
+    RES_4K("4K UHD", Quality.UHD, "3840×2160"),
+    RES_1080P("1080p FHD", Quality.FHD, "1920×1080"),
+    RES_720P("720p HD", Quality.HD, "1280×720"),
+    RES_480P("480p SD", Quality.SD, "854×480")
+}
+
+enum class CameraCaptureMode(val displayName: String) {
+    PHOTO("FOTO"),
+    VIDEO("VIDEO")
+}
+
 data class CameraHardwareDetails(
     val sensorName: String = "Unknown",
     val is60FpsSupported: Boolean = false,
     val availableFpsRanges: List<Range<Int>> = emptyList(),
+    val activeFpsRange: Range<Int>? = null,
     val isContinuousAfSupported: Boolean = false,
     val availableAfModes: List<String> = emptyList(),
+    val activeAfMode: String = "AUTO",
     val isSamsungDevice: Boolean = false
 )
 
@@ -56,29 +76,77 @@ object SamsungCameraHelper {
                 Build.BRAND.contains("samsung", ignoreCase = true)
 
     /**
-     * Build CameraX Preview use case with Camera2Interop injecting:
-     * - CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE to (60, 60)
-     * - CaptureRequest.CONTROL_AF_MODE to CONTROL_AF_MODE_CONTINUOUS_VIDEO
-     * - CaptureRequest.CONTROL_MODE to CONTROL_MODE_AUTO
+     * Resolves the optimal FPS range strictly supported by the camera hardware.
+     * Prevents passing unsupported ranges like fixed [60, 60] which causes Samsung HAL
+     * 3A algorithm (Autofocus & Exposure) to freeze into fixed focus.
+     */
+    fun resolveOptimalFpsRange(
+        supportedRanges: List<Range<Int>>,
+        requestedFps: FpsMode
+    ): Range<Int>? {
+        if (requestedFps == FpsMode.FPS_AUTO || supportedRanges.isEmpty()) {
+            return null
+        }
+
+        if (requestedFps == FpsMode.FPS_60) {
+            // 1. Priority 1: Exact fixed 60 [60, 60] if supported by this sensor
+            val exact60 = supportedRanges.firstOrNull { it.lower == 60 && it.upper == 60 }
+            if (exact60 != null) return exact60
+
+            // 2. Priority 2: Variable 60 (e.g. [30, 60] or [15, 60]) standard on Samsung Galaxy sensors
+            val dynamic60 = supportedRanges
+                .filter { it.upper >= 60 }
+                .maxByOrNull { it.lower }
+            if (dynamic60 != null) return dynamic60
+
+            // 3. Fallback: sensor max range if 60 not supported
+            return supportedRanges.maxByOrNull { it.upper }
+        }
+
+        if (requestedFps == FpsMode.FPS_30) {
+            val exact30 = supportedRanges.firstOrNull { it.lower == 30 && it.upper == 30 }
+            if (exact30 != null) return exact30
+
+            val dynamic30 = supportedRanges
+                .filter { it.upper == 30 }
+                .maxByOrNull { it.lower }
+            if (dynamic30 != null) return dynamic30
+        }
+
+        return null
+    }
+
+    /**
+     * Builds Preview use case with optional FPS range and continuous AF mode.
      */
     @OptIn(ExperimentalCamera2Interop::class)
-    fun build60FpsPreview(): Preview {
+    fun buildPreview(
+        targetFpsRange: Range<Int>?,
+        isPhotoMode: Boolean
+    ): Preview {
         val previewBuilder = Preview.Builder()
         val camera2Extender = Camera2Interop.Extender(previewBuilder)
 
-        // 1. Memaksa target FPS ke 60 FPS range (60, 60) pada level hardware HAL Samsung
-        camera2Extender.setCaptureRequestOption(
-            CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
-            Range(60, 60)
-        )
+        // Set validated FPS range if available
+        if (targetFpsRange != null) {
+            camera2Extender.setCaptureRequestOption(
+                CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
+                targetFpsRange
+            )
+            Log.d(TAG, "Preview setting CONTROL_AE_TARGET_FPS_RANGE = $targetFpsRange")
+        }
 
-        // 2. Memaksa Continuous Video Auto Focus tetap aktif (mencegah autofocus terkunci pada Samsung)
+        // Set Continuous AF mode depending on Photo vs Video mode
+        val afMode = if (isPhotoMode) {
+            CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_PICTURE
+        } else {
+            CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_VIDEO
+        }
         camera2Extender.setCaptureRequestOption(
             CaptureRequest.CONTROL_AF_MODE,
-            CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_VIDEO
+            afMode
         )
 
-        // 3. Pastikan Auto Mode dan Auto Exposure aktif
         camera2Extender.setCaptureRequestOption(
             CaptureRequest.CONTROL_MODE,
             CameraMetadata.CONTROL_MODE_AUTO
@@ -88,17 +156,25 @@ object SamsungCameraHelper {
             CameraMetadata.CONTROL_AE_MODE_ON
         )
 
-        Log.d(TAG, "Preview dibangun dengan target FPS (60, 60) dan CONTINUOUS_VIDEO AF")
         return previewBuilder.build()
     }
 
     /**
-     * Build CameraX VideoCapture use case configured with high quality FHD recording.
+     * Builds ImageCapture use case configured for high quality capture.
      */
-    fun buildVideoCapture(): VideoCapture<Recorder> {
+    fun buildImageCapture(): ImageCapture {
+        return ImageCapture.Builder()
+            .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
+            .build()
+    }
+
+    /**
+     * Builds VideoCapture use case configured with the user's selected resolution.
+     */
+    fun buildVideoCapture(resolutionMode: ResolutionMode): VideoCapture<Recorder> {
         val qualitySelector = QualitySelector.from(
-            Quality.FHD,
-            FallbackStrategy.lowerQualityOrHigherThan(Quality.FHD)
+            resolutionMode.quality,
+            FallbackStrategy.lowerQualityOrHigherThan(resolutionMode.quality)
         )
         val recorder = Recorder.Builder()
             .setQualitySelector(qualitySelector)
@@ -108,45 +184,78 @@ object SamsungCameraHelper {
     }
 
     /**
-     * Apply Camera2 capture request options directly onto the active camera stream.
-     * This guarantees that during video recording repeating requests, Samsung's HAL
-     * does not revert back to 30 FPS or fixed focus.
+     * Safely applies camera controls to the active session.
      */
     @OptIn(ExperimentalCamera2Interop::class)
-    fun enforceSamsungHardwareSettings(context: Context, camera: Camera) {
-        val camera2CameraControl = Camera2CameraControl.from(camera.cameraControl)
+    fun applyActiveHardwareSettings(
+        context: Context,
+        camera: Camera,
+        targetFpsRange: Range<Int>?,
+        isPhotoMode: Boolean
+    ) {
+        try {
+            val camera2CameraControl = Camera2CameraControl.from(camera.cameraControl)
+            val builder = CaptureRequestOptions.Builder()
 
-        val captureRequestOptions = CaptureRequestOptions.Builder()
-            .setCaptureRequestOption(
-                CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
-                Range(60, 60)
-            )
-            .setCaptureRequestOption(
-                CaptureRequest.CONTROL_AF_MODE,
+            if (targetFpsRange != null) {
+                builder.setCaptureRequestOption(
+                    CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
+                    targetFpsRange
+                )
+            }
+
+            val afMode = if (isPhotoMode) {
+                CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_PICTURE
+            } else {
                 CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_VIDEO
-            )
-            .setCaptureRequestOption(
-                CaptureRequest.CONTROL_MODE,
-                CameraMetadata.CONTROL_MODE_AUTO
-            )
-            .setCaptureRequestOption(
-                CaptureRequest.CONTROL_AE_MODE,
-                CameraMetadata.CONTROL_AE_MODE_ON
-            )
-            .build()
+            }
 
-        camera2CameraControl.setCaptureRequestOptions(captureRequestOptions)
-            .addListener(
-                { Log.d(TAG, "Hardware settings (60, 60 FPS + Continuous AF) berhasil diterapkan ke Camera Control") },
-                ContextCompat.getMainExecutor(context)
-            )
+            builder.setCaptureRequestOption(CaptureRequest.CONTROL_AF_MODE, afMode)
+            builder.setCaptureRequestOption(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
+            builder.setCaptureRequestOption(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_ON)
+
+            camera2CameraControl.setCaptureRequestOptions(builder.build())
+                .addListener(
+                    {
+                        Log.d(TAG, "Hardware settings applied: FPS=$targetFpsRange, AF=$afMode")
+                    },
+                    ContextCompat.getMainExecutor(context)
+                )
+        } catch (e: Exception) {
+            Log.e(TAG, "Gagal menerapkan capture request options: ${e.message}")
+        }
     }
 
     /**
-     * Query Camera2 characteristics to inspect supported FPS ranges and AF modes on Samsung HAL.
+     * Triggers active autofocus cycle on Samsung HAL (forces the lens to re-focus).
      */
     @OptIn(ExperimentalCamera2Interop::class)
-    fun inspectCameraHardware(camera: Camera): CameraHardwareDetails {
+    fun triggerAutofocus(camera: Camera, onComplete: () -> Unit = {}) {
+        try {
+            camera.cameraControl.cancelFocusAndMetering()
+            val camera2CameraControl = Camera2CameraControl.from(camera.cameraControl)
+
+            val triggerOptions = CaptureRequestOptions.Builder()
+                .setCaptureRequestOption(
+                    CaptureRequest.CONTROL_AF_TRIGGER,
+                    CameraMetadata.CONTROL_AF_TRIGGER_START
+                )
+                .build()
+
+            camera2CameraControl.setCaptureRequestOptions(triggerOptions)
+            Log.d(TAG, "CONTROL_AF_TRIGGER_START sent to camera")
+            onComplete()
+        } catch (e: Exception) {
+            Log.e(TAG, "Error triggering autofocus: ${e.message}")
+            onComplete()
+        }
+    }
+
+    /**
+     * Inspects camera characteristics to read real sensor capabilities.
+     */
+    @OptIn(ExperimentalCamera2Interop::class)
+    fun inspectCameraHardware(camera: Camera, activeRange: Range<Int>?): CameraHardwareDetails {
         return try {
             val camera2Info = Camera2CameraInfo.from(camera.cameraInfo)
             val fpsRanges = camera2Info.getCameraCharacteristic(
@@ -158,7 +267,8 @@ object SamsungCameraHelper {
             )?.toList() ?: emptyList()
 
             val has60Fps = fpsRanges.any { it.upper >= 60 }
-            val hasContinuousAf = afModes.contains(CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
+            val hasContinuousAf = afModes.contains(CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_VIDEO) ||
+                    afModes.contains(CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
 
             val readableAfModes = afModes.map { mode ->
                 when (mode) {
@@ -176,8 +286,10 @@ object SamsungCameraHelper {
                 sensorName = Build.MODEL,
                 is60FpsSupported = has60Fps,
                 availableFpsRanges = fpsRanges,
+                activeFpsRange = activeRange,
                 isContinuousAfSupported = hasContinuousAf,
                 availableAfModes = readableAfModes,
+                activeAfMode = if (hasContinuousAf) "CONTINUOUS" else "AUTO",
                 isSamsungDevice = isSamsungDevice
             )
         } catch (e: Exception) {
@@ -190,8 +302,7 @@ object SamsungCameraHelper {
     }
 
     /**
-     * Trigger manual tap-to-focus on preview without permanently disabling continuous AF.
-     * After 3 seconds auto-cancel duration, it smoothly returns to continuous video AF.
+     * Performs tap to focus with auto-cancel timer back to continuous autofocus.
      */
     fun performTapToFocus(
         previewView: PreviewView,
@@ -207,7 +318,7 @@ object SamsungCameraHelper {
                 point,
                 FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE
             )
-                .setAutoCancelDuration(3, TimeUnit.SECONDS)
+                .setAutoCancelDuration(4, TimeUnit.SECONDS)
                 .build()
 
             val future = cameraControl.startFocusAndMetering(action)
@@ -229,22 +340,67 @@ object SamsungCameraHelper {
     }
 
     /**
-     * Prepare a video recording session storing output directly to MediaStore Movies directory.
+     * Takes a high-resolution photo and saves directly to MediaStore Pictures/SamsungCamera.
+     */
+    fun takePhoto(
+        context: Context,
+        imageCapture: ImageCapture,
+        onSuccess: (Uri) -> Unit,
+        onError: (String) -> Unit
+    ) {
+        val timeStamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
+        val fileName = "SAMSUNG_IMG_$timeStamp.jpg"
+
+        val contentValues = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
+            put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/SamsungCamera")
+            }
+        }
+
+        val outputOptions = ImageCapture.OutputFileOptions.Builder(
+            context.contentResolver,
+            MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+            contentValues
+        ).build()
+
+        imageCapture.takePicture(
+            outputOptions,
+            ContextCompat.getMainExecutor(context),
+            object : ImageCapture.OnImageSavedCallback {
+                override fun onImageSaved(outputFileResults: ImageCapture.OutputFileResults) {
+                    val savedUri = outputFileResults.savedUri ?: Uri.EMPTY
+                    Log.d(TAG, "Foto berhasil disimpan ke $savedUri")
+                    onSuccess(savedUri)
+                }
+
+                override fun onError(exception: ImageCaptureException) {
+                    Log.e(TAG, "Gagal mengambil foto: ${exception.message}", exception)
+                    onError(exception.message ?: "Unknown image capture error")
+                }
+            }
+        )
+    }
+
+    /**
+     * Prepares a video recording session storing output directly to MediaStore Movies/SamsungCamera.
      */
     fun prepareRecording(
         context: Context,
         videoCapture: VideoCapture<Recorder>,
+        fpsLabel: String,
         enableAudio: Boolean,
         onEvent: (VideoRecordEvent) -> Unit
     ): Recording {
         val timeStamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
-        val fileName = "SAMSUNG_60FPS_$timeStamp.mp4"
+        val fileName = "SAMSUNG_VID_${fpsLabel}_$timeStamp.mp4"
 
         val contentValues = ContentValues().apply {
             put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
             put(MediaStore.MediaColumns.MIME_TYPE, "video/mp4")
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/Samsung60FPS")
+                put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/SamsungCamera")
             }
         }
 
@@ -260,7 +416,7 @@ object SamsungCameraHelper {
             try {
                 pending = pending.withAudioEnabled()
             } catch (e: SecurityException) {
-                Log.w(TAG, "Audio recording permission not granted: ${e.message}")
+                Log.w(TAG, "Izin mikrofon belum diberikan: ${e.message}")
             }
         }
 
