@@ -1,6 +1,6 @@
 {
-  "name": "Samsung 60FPS Camera",
-  "description": "Aplikasi kamera Android native yang dioptimalkan untuk Samsung dengan CameraX dan Camera2 Interop untuk mengatasi masalah fokus terkunci pada mode 60 FPS.",
+  "name": "Samsung A15 Camera",
+  "description": "Aplikasi kamera Samsung Galaxy A15 yang ditingkatkan dengan Camera2 API untuk memaksa perekaman 60-120 FPS tanpa menghilangkan fitur utama kamera asli One UI Samsung.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

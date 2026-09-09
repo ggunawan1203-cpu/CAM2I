@@ -53,148 +53,9 @@ import java.util.concurrent.TimeUnit
 
 private const val TAG = "SamsungCameraHelper"
 
-enum class FpsMode(val displayName: String, val targetFps: Int, val description: String) {
-    FPS_120("120 FPS", 120, "High Speed 119 fps (optimal di 720p HD)"),
-    FPS_60("60 FPS", 60, "Ultra Smooth 60 FPS"),
-    FPS_30("30 FPS", 30, "Format standar 30 FPS"),
-    FPS_AUTO("Auto FPS", 0, "Otomatis diatur sensor")
-}
-
-enum class BitrateMode(
-    val displayName: String,
-    val bps: Int,
-    val approxPerTenSec: String,
-    val description: String
-) {
-    BITRATE_DEFAULT("Default (~20 Mbps)", 20_000_000, "~25 MB", "Standar CameraX hemat ruang"),
-    BITRATE_50("50 Mbps (Tinggi)", 50_000_000, "~60 MB", "Kualitas tajam, minim kompresi"),
-    BITRATE_100("100 Mbps (Ultra - Open Camera)", 100_000_000, "~113 MB", "Sesuai Open Camera (~113 MB / 10s)"),
-    BITRATE_150("150 Mbps (Maksimum)", 150_000_000, "~180 MB", "Bitrate profesional tanpa kompresi"),
-    BITRATE_200("200 Mbps (Extreme Master)", 200_000_000, "~240 MB", "Kualitas tertinggi hardware Samsung")
-}
-
-enum class ResolutionMode(
-    val displayName: String,
-    val quality: Quality,
-    val description: String,
-    val bestFor: String
-) {
-    RES_4K("4K UHD", Quality.UHD, "3840×2160", "Bitrate ultra 100-150 Mbps"),
-    RES_1080P("1080p FHD", Quality.FHD, "1920×1080", "Standar 60 FPS & 100 Mbps"),
-    RES_720P("720p HD", Quality.HD, "1280×720", "Optimal 120 FPS High Speed (Open Camera 119 fps)"),
-    RES_480P("480p SD", Quality.SD, "854×480", "Ukuran file kecil")
-}
-
-enum class CameraCaptureMode(
-    val id: String,
-    val displayName: String,
-    val isVideo: Boolean = false,
-    val description: String = ""
-) {
-    PORTRAIT(
-        id = "PORTRAIT",
-        displayName = "POTRET",
-        isVideo = false,
-        description = "Mode Potret: Efek kedalaman bokeh & fokus prioritas wajah"
-    ),
-    PHOTO(
-        id = "PHOTO",
-        displayName = "FOTO",
-        isVideo = false,
-        description = "Mode Foto: Resolusi maksimal dengan detail tajam"
-    ),
-    NIGHT(
-        id = "NIGHT",
-        displayName = "MALAM",
-        isVideo = false,
-        description = "Mode Malam: Shutter adaptif & multi-frame noise reduction"
-    ),
-    VIDEO(
-        id = "VIDEO",
-        displayName = "VIDEO",
-        isVideo = true,
-        description = "Mode Video: 60/120 FPS, Bitrate 100 Mbps, & EIS+OIS hardware"
-    ),
-    CINEMATIC_VIDEO(
-        id = "CINEMATIC_VIDEO",
-        displayName = "CINEMATIC",
-        isVideo = true,
-        description = "Mode Sinematik Video: Efek Bokeh ML Kit AI, Rasio 2.39:1 & Aperture f/1.4"
-    ),
-    PRO_VIDEO(
-        id = "PRO_VIDEO",
-        displayName = "PRO VIDEO",
-        isVideo = true,
-        description = "Mode Pro Video: Kontrol Manual ISO, Shutter, WB, Fokus, & Audio"
-    )
-}
-
-enum class CinematicAperture(
-    val label: String,
-    val fNumber: Float,
-    val blurRadiusDp: Float,
-    val description: String
-) {
-    F1_4("f/1.4", 1.4f, 28f, "Dreamy Bokeh • Kedalaman lensa prima"),
-    F2_0("f/2.0", 2.0f, 20f, "Portrait Cinema • Pemisahan subjek halus"),
-    F2_8("f/2.8", 2.8f, 13f, "Classic Movie • Kedalaman seimbang"),
-    F4_0("f/4.0", 4.0f, 7f, "Subtle Cinema • Latar belakang lembut"),
-    F8_0("f/8.0", 8.0f, 2f, "Deep Cinema • Bidang fokus lebar")
-}
-
-enum class CinematicStyle(
-    val displayName: String,
-    val filterColorHex: Long,
-    val description: String
-) {
-    GAUSSIAN("Creamy Bokeh", 0x00000000, "Lensa 50mm bioskop alami"),
-    ANAMORPHIC("Anamorphic Blue", 0x1A0284C7, "Gaya bioskop Hollywood dengan anamorphic streaks"),
-    SPOTLIGHT("Studio Focus", 0x40000000, "Latar belakang menggelap fokus pada subjek"),
-    WARM_GOLD("Golden Cinema", 0x20F59E0B, "Tona hangat film cinema 35mm")
-}
-
-data class CinematicBokehState(
-    val isEnabled: Boolean = true,
-    val aperture: CinematicAperture = CinematicAperture.F1_4,
-    val style: CinematicStyle = CinematicStyle.GAUSSIAN,
-    val isWidescreen239Enabled: Boolean = true,
-    val isSubjectDetected: Boolean = false,
-    val subjectConfidence: Float = 0f,
-    val subjectBounds: RectF? = null
-)
-
-data class ProVideoManualSettings(
-    val iso: Int = 0, // 0 = Auto, or 50, 100, 200, 400, 800, 1600, 3200
-    val shutterSpeedNs: Long = 0L, // 0L = Auto, or 1/30s, 1/60s, 1/125s, 1/250s, 1/500s, 1/1000s
-    val awbMode: Int = CameraMetadata.CONTROL_AWB_MODE_AUTO,
-    val focusDistance: Float = -1f, // -1f = Auto Continuous, 0.0f = infinity, 10.0f = macro
-    val audioSource: String = "OMNI" // OMNI, FRONT, REAR
-)
-
-data class CapturedMediaItem(
-    val uri: Uri,
-    val isVideo: Boolean,
-    val displayName: String,
-    val dateAddedMillis: Long,
-    val relativePath: String = "DCIM/Camera"
-)
-
-data class CameraHardwareDetails(
-    val sensorName: String = "Unknown",
-    val hardwareLevel: String = "UNKNOWN",
-    val isCamera2ApiEnabled: Boolean = true,
-    val is60FpsSupported: Boolean = false,
-    val availableFpsRanges: List<Range<Int>> = emptyList(),
-    val highSpeedFpsRanges: List<Range<Int>> = emptyList(),
-    val activeFpsRange: Range<Int>? = null,
-    val isContinuousAfSupported: Boolean = false,
-    val isEisSupported: Boolean = false,
-    val isOisSupported: Boolean = false,
-    val isStabilizationActive: Boolean = true,
-    val availableAfModes: List<String> = emptyList(),
-    val activeAfMode: String = "AUTO",
-    val isSamsungDevice: Boolean = false
-)
+// Note: FpsMode, BitrateMode, ResolutionMode, CameraCaptureMode, CinematicAperture,
+// CinematicStyle, CinematicBokehState, ProVideoManualSettings, CapturedMediaItem,
+// and CameraHardwareDetails are defined in CameraModels.kt
 
 object SamsungCameraHelper {
 
@@ -394,7 +255,18 @@ object SamsungCameraHelper {
                     )
                     Log.d(TAG, "Preview Camera2: Mode MALAM (Night Scene + High Quality NR) applied")
                 }
+                CameraCaptureMode.MACRO -> {
+                    camera2Extender.setCaptureRequestOption(
+                        CaptureRequest.CONTROL_AF_MODE,
+                        CameraMetadata.CONTROL_AF_MODE_MACRO
+                    )
+                    camera2Extender.setCaptureRequestOption(
+                        CaptureRequest.EDGE_MODE,
+                        CameraMetadata.EDGE_MODE_HIGH_QUALITY
+                    )
+                }
                 CameraCaptureMode.VIDEO,
+                CameraCaptureMode.SLOW_MOTION,
                 CameraCaptureMode.CINEMATIC_VIDEO,
                 CameraCaptureMode.PRO_VIDEO -> {
                     if (lockFpsAntiDrop) {
@@ -412,7 +284,8 @@ object SamsungCameraHelper {
                         )
                     }
                 }
-                CameraCaptureMode.PHOTO -> {
+                CameraCaptureMode.PHOTO,
+                CameraCaptureMode.PRO -> {
                     // Standard photo preview
                 }
             }
@@ -769,6 +642,7 @@ object SamsungCameraHelper {
                     )
                 }
                 CameraCaptureMode.VIDEO,
+                CameraCaptureMode.SLOW_MOTION,
                 CameraCaptureMode.CINEMATIC_VIDEO,
                 CameraCaptureMode.PRO_VIDEO -> {
                     if (lockFpsAntiDrop) {
@@ -786,7 +660,9 @@ object SamsungCameraHelper {
                         )
                     }
                 }
-                CameraCaptureMode.PHOTO -> {
+                CameraCaptureMode.PHOTO,
+                CameraCaptureMode.PRO,
+                CameraCaptureMode.MACRO -> {
                     // standard
                 }
             }

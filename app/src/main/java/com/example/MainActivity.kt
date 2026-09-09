@@ -2479,16 +2479,22 @@ fun BottomSectionControls(
                         CameraCaptureMode.PHOTO -> Color(0xFF0284C7)
                         CameraCaptureMode.NIGHT -> Color(0xFF8B5CF6)
                         CameraCaptureMode.VIDEO -> Color(0xFFEF4444)
+                        CameraCaptureMode.SLOW_MOTION -> Color(0xFF06B6D4)
                         CameraCaptureMode.CINEMATIC_VIDEO -> Color(0xFFEC4899)
                         CameraCaptureMode.PRO_VIDEO -> Color(0xFFE11D48)
+                        CameraCaptureMode.PRO -> Color(0xFFF97316)
+                        CameraCaptureMode.MACRO -> Color(0xFF10B981)
                     }
                     val icon = when (mode) {
                         CameraCaptureMode.PORTRAIT -> Icons.Default.Portrait
                         CameraCaptureMode.PHOTO -> Icons.Default.PhotoCamera
                         CameraCaptureMode.NIGHT -> Icons.Default.NightsStay
                         CameraCaptureMode.VIDEO -> Icons.Default.Videocam
+                        CameraCaptureMode.SLOW_MOTION -> Icons.Rounded.PlayArrow
                         CameraCaptureMode.CINEMATIC_VIDEO -> Icons.Default.Movie
                         CameraCaptureMode.PRO_VIDEO -> Icons.Default.Tune
+                        CameraCaptureMode.PRO -> Icons.Default.Tune
+                        CameraCaptureMode.MACRO -> Icons.Default.CenterFocusStrong
                     }
 
                     Box(
